@@ -1,0 +1,6 @@
+Man in the middle between a virtual osmo-bts instance and a virtual osmocom-bb virtual layer 1 instance.
+
+Basically configurated to intercept all uplink messages sent from ms to bts and all 
+downlink messages sent from bts to ms.
+
+Realized with multicast sockets.

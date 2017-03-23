@@ -6,23 +6,23 @@
 #include <coder.h>
 #include <cipherer.h>
 
-#define SUFFIX_ENCODED ".enc"
-#define SUFFIX_DECODED ".dec"
+#define SUFFIX_PLAIN ".plain"
+#define SUFFIX_CRC ".crc"
+#define SUFFIX_CC ".cc"
+#define SUFFIX_INTERLEAVED ".il"
+#define SUFFIX_BURSTMAP ".burstmap"
 #define SUFFIX_XCCH ".xcch"
 #define SUFFIX_FACCH ".facch"
 #define HEX_FILE_LINE_LEN 32
-#define MAX_DATA_LEN (8 * 116) // length of facch interleaved encoded bursts
 
 static int ciphering = 1;
 static char* data_path = "hex_data";
-static int data_len = -1;
-
+static int input_len = -1;
+static int substep_output = 0;
+static char path_buf[100];
 
 static enum mode {
-	ENCODE_XCCH_FACCH,
-	DECODE_XCCH,
-	DECODE_FACCH,
-	UNDEFINED
+	ENCODE_XCCH_FACCH, DECODE_XCCH, DECODE_FACCH, UNDEFINED
 } mode = UNDEFINED;
 
 static void handle_options(int argc, char **argv)
@@ -31,8 +31,9 @@ static void handle_options(int argc, char **argv)
 		int option_index = 0, c;
 		static struct option long_options[] = {{
 		        "no-ciphering", no_argument, &ciphering, 0}, {
-		        "data-path", required_argument, 0, 'p'},
-		{0, 0, 0, 0}, };
+		        "data-path", required_argument, 0, 'p'}, {
+		        "substep-output", no_argument, &substep_output, 1}, {
+		        0, 0, 0, 0}, };
 
 		c = getopt_long(argc, argv, "p:", long_options, &option_index);
 		if (c == -1)
@@ -54,8 +55,9 @@ int is_hex_char(char c)
 	       || (c >= 'A' && c <= 'F');
 }
 
-void set_mode() {
-	switch (data_len) {
+void set_mode()
+{
+	switch (input_len) {
 	case 184:
 		mode = ENCODE_XCCH_FACCH;
 		break;
@@ -81,15 +83,16 @@ void parse_file(uint8_t *data_buf)
 	if (fp == NULL) {
 		fprintf(stderr, "File %s could not be opened: ", data_path);
 		perror("");
-	        exit(EXIT_FAILURE);
+		exit(EXIT_FAILURE);
 	}
-	for (cbuf = fgetc(fp); i < max_hex_len && cbuf != EOF; cbuf = fgetc(fp)) {
+	for (cbuf = fgetc(fp); i < max_hex_len && cbuf != EOF;
+	                cbuf = fgetc(fp)) {
 		if (is_hex_char(cbuf)) {
 			hexstring[i++] = cbuf;
 		}
 	}
 	fclose(fp);
-	data_len = i * 4; // one hex is 4 bit
+	input_len = i * 4; // one hex is 4 bit
 	// add null termination to string
 	hexstring[i] = '\0';
 
@@ -112,7 +115,7 @@ void write_file(char * path, uint8_t * data_buf, int len_bytes)
 	}
 	for (i = 0; i < strlen(hexstring); ++i) {
 		fputc(hexstring[i], fp);
-		if(!(i+1 % HEX_FILE_LINE_LEN)) {
+		if (!(i + 1 % HEX_FILE_LINE_LEN)) {
 			fputc('\r', fp);
 			fputc('\n', fp);
 		}
@@ -120,14 +123,25 @@ void write_file(char * path, uint8_t * data_buf, int len_bytes)
 	fclose(fp);
 }
 
+char* getPath(char* base_path, char* suffix1, char* suffix2)
+{
+	strncpy(path_buf, base_path, strlen(base_path) + 1);
+	strcat(strcat(path_buf, suffix1), suffix2);
+	return path_buf;
+}
+
 int main(int argc, char **argv)
 {
 
-	uint8_t input_data_buf[data_len];
-	uint8_t enc_bursts_xcch[4 * 116 / 8];
-	uint8_t enc_bursts_facch[8 * 116 / 8];
-	uint8_t dec_data[184 / 8];
-	char path_buf[100];
+	uint8_t input_data_buf[input_len];
+	uint8_t burstmap_xcch[LEN_BURSTMAP_XCCH / 8];
+	uint8_t il_xcch[LEN_INTERLEAVED_XCCH / 8];
+	uint8_t burstmap_facch[LEN_BURSTMAP_FACCH / 8];
+	uint8_t il_facch[LEN_INTERLEAVED_FACCH / 8];
+	uint8_t cc[LEN_CC / 8];
+	// need an extra byte buffer as crc_len is not of factor 8 (tailing bits)
+	uint8_t crc[(LEN_CRC + 8) / 8];
+	uint8_t plain[LEN_PLAIN / 8];
 
 	handle_options(argc, argv);
 
@@ -137,38 +151,67 @@ int main(int argc, char **argv)
 
 	switch (mode) {
 	case ENCODE_XCCH_FACCH:
-		xcch_encode(input_data_buf, enc_bursts_xcch);
-		facch_encode(input_data_buf, enc_bursts_facch);
+		xcch_encode(input_data_buf, burstmap_xcch, il_xcch, cc, crc);
+		facch_encode(input_data_buf, burstmap_facch, il_facch, NULL,
+		             NULL);
 		if (ciphering) {
 			// TODO encrypt the coded data buffers
 		}
-		strncpy(path_buf, data_path, strlen(data_path) + 1);
-		write_file(strcat(strcat(path_buf, SUFFIX_XCCH), SUFFIX_ENCODED),
-		           enc_bursts_xcch, 4 * 116);
-		strncpy(path_buf, data_path, strlen(data_path) + 1);
-		write_file(strcat(strcat(path_buf, SUFFIX_FACCH), SUFFIX_ENCODED),
-		           enc_bursts_facch, 8 * 116);
+		write_file(getPath(data_path, SUFFIX_XCCH, SUFFIX_BURSTMAP),
+		           burstmap_xcch, LEN_BURSTMAP_XCCH);
+		write_file(getPath(data_path, SUFFIX_FACCH, SUFFIX_BURSTMAP),
+		           burstmap_facch, LEN_BURSTMAP_FACCH);
+		if (substep_output) {
+			write_file(getPath(data_path, SUFFIX_XCCH,
+			                   SUFFIX_INTERLEAVED),
+			           il_xcch, LEN_INTERLEAVED_XCCH);
+			write_file(getPath(data_path, SUFFIX_FACCH,
+			                   SUFFIX_INTERLEAVED),
+			           il_facch, LEN_INTERLEAVED_FACCH);
+			write_file(getPath(data_path, "", SUFFIX_CC), cc,
+			           LEN_CC);
+			write_file(getPath(data_path, "", SUFFIX_CRC), crc,
+			           LEN_CRC + 4);
+		}
 		break;
 	case DECODE_XCCH:
 		if (ciphering) {
 			// TODO decipher the input data buffer
 		}
-		xcch_decode(dec_data, input_data_buf);
-		write_file(strcat(strcat(data_path, SUFFIX_XCCH), SUFFIX_DECODED),
-				           dec_data, 184);
+		xcch_decode(plain, input_data_buf, il_xcch, cc, crc);
+		write_file(getPath(data_path, SUFFIX_XCCH, SUFFIX_PLAIN), plain,
+		           LEN_PLAIN);
+		if (substep_output) {
+			write_file(getPath(data_path, SUFFIX_XCCH,
+			                   SUFFIX_INTERLEAVED),
+			           il_xcch, LEN_INTERLEAVED_XCCH);
+			write_file(getPath(data_path, "", SUFFIX_CC), cc,
+			           LEN_CC);
+			write_file(getPath(data_path, "", SUFFIX_CRC), crc,
+			           LEN_CRC + 4);
+		}
 		break;
 	case DECODE_FACCH:
 		if (ciphering) {
 			// TODO decipher the input data buffer
 		}
-		// encoding as facch
-		facch_decode(dec_data, input_data_buf);
-		write_file(strcat(strcat(data_path, SUFFIX_FACCH), SUFFIX_DECODED),
-				           dec_data, 184);
+		facch_decode(plain, input_data_buf, il_facch, cc, crc);
+		write_file(getPath(data_path, SUFFIX_FACCH, SUFFIX_PLAIN),
+		           plain, LEN_PLAIN);
+		if (substep_output) {
+			write_file(getPath(data_path, SUFFIX_FACCH,
+			                   SUFFIX_INTERLEAVED),
+			           il_facch, LEN_INTERLEAVED_FACCH);
+			write_file(getPath(data_path, "", SUFFIX_CC), cc,
+			           LEN_CC);
+			write_file(getPath(data_path, "", SUFFIX_CRC), crc,
+			           LEN_CRC + 4);
+		}
 		break;
 	case UNDEFINED:
-		fprintf(stderr, "Invalid data length of %d - exit. ", data_len);
-	        exit(EXIT_FAILURE);
+		fprintf(stderr, "Invalid data length of %d - exit. ",
+		        input_len);
+		exit(EXIT_FAILURE);
 		break;
 	}
 	// not reached

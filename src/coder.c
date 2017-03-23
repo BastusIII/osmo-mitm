@@ -13,18 +13,17 @@
 #include <osmocom/core/conv.h>
 #include <osmocom/core/crcgen.h>
 
+#include <coder.h>
+
 /**
  * GSM SACCH, FACCH, BCCH, CBCH, PCH, AGCH, SDCCH parity (FIRE code)
  *
  * g(x) = (x^23 + 1)(x^17 + x^3 + 1)
  *      = x^40 + x^26 + x^23 + x^17 + x^3 + a1
  */
-static const struct osmo_crc64gen_code gsm0503_fire_crc40 = {
-	.bits = 40,
-	.poly = 0x0004820009ULL,
-	.init = 0x0000000000ULL,
-	.remainder = 0xffffffffffULL,
-};
+static const struct osmo_crc64gen_code gsm0503_fire_crc40 = {.bits = 40, .poly =
+                0x0004820009ULL, .init = 0x0000000000ULL, .remainder =
+                0xffffffffffULL, };
 
 // GSM SACCH, FACCH, BCCH, CBCH, PCH, AGCH, SDCCH convolutional code defined in libosmocore/gsm/gsm0503_conv.c
 extern const struct osmo_conv_code gsm0503_xcch;
@@ -64,7 +63,7 @@ void gsm0503_tch_fr_deinterleave(sbit_t *cB, sbit_t *iB)
 {
 	int j, k, B;
 
-	for (k=0; k<456; k++) {
+	for (k = 0; k < 456; k++) {
 		B = k & 7;
 		j = 2 * ((49 * k) % 57) + ((k & 7) >> 2);
 		cB[k] = iB[B * 114 + j];
@@ -78,7 +77,7 @@ void gsm0503_tch_fr_interleave(ubit_t *cB, ubit_t *iB)
 {
 	int j, k, B;
 
-	for (k=0; k<456; k++) {
+	for (k = 0; k < 456; k++) {
 		B = k & 7;
 		j = 2 * ((49 * k) % 57) + ((k & 7) >> 2);
 		iB[B * 114 + j] = cB[k];
@@ -125,10 +124,10 @@ void gsm0503_tch_burst_unmap(sbit_t *iB, sbit_t *eB, sbit_t *h, int odd)
 
 	/* brainfuck: only copy even or odd bits */
 	if (iB) {
-		for (i=odd; i<57; i+=2)
+		for (i = odd; i < 57; i += 2)
 			iB[i] = eB[i];
-		for (i=58-odd; i<114; i+=2)
-			iB[i] = eB[i+2];
+		for (i = 58 - odd; i < 114; i += 2)
+			iB[i] = eB[i + 2];
 	}
 
 	if (h) {
@@ -148,10 +147,10 @@ void gsm0503_tch_burst_map(ubit_t *iB, ubit_t *eB, const ubit_t *h, int odd)
 
 	/* brainfuck: only copy even or odd bits */
 	if (eB) {
-		for (i=odd; i<57; i+=2)
+		for (i = odd; i < 57; i += 2)
 			eB[i] = iB[i];
-		for (i=58-odd; i<114; i+=2)
-			eB[i+2] = iB[i];
+		for (i = 58 - odd; i < 114; i += 2)
+			eB[i + 2] = iB[i];
 	}
 
 	if (h) {
@@ -171,23 +170,26 @@ void gsm0503_tch_burst_map(ubit_t *iB, ubit_t *eB, const ubit_t *h, int odd)
  * burst_buf [out] has to be able to hold 4*116/8 bit generated bursts.
  * data [in] pointer to the start of the 184 bit message data.
  */
-int xcch_encode(const uint8_t *data, uint8_t *burst_buf)
+int xcch_encode(const uint8_t *data, uint8_t *burst_buf, uint8_t *il_buf,
+                uint8_t *cc_buf, uint8_t *crc_buf)
 {
 	int tail_index, i;
 	ubit_t hu = 1, hl = 1;
-	ubit_t uD[184+40+4]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	ubit_t cD[4*114]; // buffer for convolutional coded data
-	ubit_t iD[4*114]; // buffer for interleaved data
-	ubit_t eD[4*116]; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	ubit_t cD[LEN_CC]; // buffer for convolutional coded data
+	ubit_t iD[LEN_INTERLEAVED_XCCH]; // buffer for interleaved data
+	ubit_t eD[LEN_BURSTMAP_XCCH]; // buffer for the 4 * 116 bit mapped bursts
 
 	// get unpacked bit buffer from message data
-	osmo_pbit2ubit(uD, data, 184);
+	osmo_pbit2ubit(uD, data, LEN_PLAIN);
 
 	// calculate and set firecode parity bits
-	osmo_crc64gen_set_bits(&gsm0503_fire_crc40, uD, 184, &uD[184]);
+	osmo_crc64gen_set_bits(&gsm0503_fire_crc40, uD, LEN_PLAIN,
+	                       &uD[LEN_PLAIN]);
 
 	// set tailbits to 0
-	for (tail_index = 224; tail_index <= 227; ++tail_index) {
+	for (tail_index = LEN_CRC - 4; tail_index <= LEN_CRC - 1;
+	                ++tail_index) {
 		uD[tail_index] = 0;
 	}
 
@@ -199,11 +201,21 @@ int xcch_encode(const uint8_t *data, uint8_t *burst_buf)
 
 	// map each data block on a burst. hl and hn are 1 for XCCH.
 	for (i = 0; i < 4; i++) {
-		gsm0503_xcch_burst_map(&iD[i * 114], &eD[i * 116], &hu,
-		                       &hl);
+		gsm0503_xcch_burst_map(&iD[i * 114], &eD[i * 116], &hu, &hl);
 	}
 
-	osmo_ubit2pbit(burst_buf, eD, 4*116);
+	osmo_ubit2pbit(burst_buf, eD, 4 * 116);
+
+	if (il_buf) {
+		osmo_ubit2pbit(il_buf, uD, LEN_INTERLEAVED_FACCH);
+	}
+	if (cc_buf) {
+		osmo_ubit2pbit(cc_buf, cD, LEN_CC);
+	}
+	if (crc_buf) {
+		osmo_ubit2pbit(crc_buf, uD, LEN_CRC);
+	}
+
 	return 0;
 }
 
@@ -215,35 +227,47 @@ int xcch_encode(const uint8_t *data, uint8_t *burst_buf)
  * bursts [in] pointer to an array of the 4*116 ubit burst data.
  * data_buf [out] has to be able to hold 184 bit message data
  */
-int xcch_decode(uint8_t *data_buf, const uint8_t *bursts)
+int xcch_decode(uint8_t *data_buf, const uint8_t *bursts, uint8_t *il_buf,
+                uint8_t *cc_buf, uint8_t *crc_buf)
 {
 	int i, crc_error;
 	sbit_t hu, hl; // buffer for hl and hn values returned by unmapping
-	ubit_t uD[184+40+4]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	sbit_t cD[4*114]; // buffer for convolutional coded data
-	sbit_t iD[4*114]; // buffer for interleaved data
-	sbit_t eD[4*116]; // buffer for the 4 * 116 bit mapped bursts
-	ubit_t eD_u[4*116]; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	sbit_t cD[LEN_CC]; // buffer for convolutional coded data
+	sbit_t iD[LEN_INTERLEAVED_FACCH]; // buffer for interleaved data
+	sbit_t eD[LEN_BURSTMAP_XCCH]; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t buf[LEN_BURSTMAP_XCCH]; // buffer for the 4 * 116 bit mapped bursts
 
 	// convert ubits to sbits for further processing
-	osmo_pbit2ubit(eD_u, bursts, 4*116);
-	osmo_ubit2sbit(eD, eD_u, 4*116);
+	osmo_pbit2ubit(buf, bursts, LEN_BURSTMAP_XCCH);
+	osmo_ubit2sbit(eD, buf, LEN_BURSTMAP_XCCH);
 
 	for (i = 0; i < 4; i++) {
 		// hu and hl can be savely ignored, they are always 1
-		gsm0503_xcch_burst_unmap(&iD[i * 114], &eD[i * 116], &hu,
-		                         &hl);
+		gsm0503_xcch_burst_unmap(&iD[i * 114], &eD[i * 116], &hu, &hl);
 	}
 
 	gsm0503_xcch_deinterleave(cD, iD);
 
 	osmo_conv_decode(&gsm0503_xcch, cD, uD);
 
-	crc_error = osmo_crc64gen_check_bits(&gsm0503_fire_crc40, uD, 184,
-	                                     &uD[184]);
+	crc_error = osmo_crc64gen_check_bits(&gsm0503_fire_crc40, uD, LEN_PLAIN,
+	                                     &uD[LEN_PLAIN]);
 
 	// unpack bits to output buffer
-	osmo_ubit2pbit(data_buf, uD, 184);
+	osmo_ubit2pbit(data_buf, uD, LEN_PLAIN);
+
+	if (il_buf) {
+		osmo_sbit2ubit(buf, iD, LEN_INTERLEAVED_XCCH);
+		osmo_ubit2pbit(il_buf, buf, LEN_INTERLEAVED_XCCH);
+	}
+	if (cc_buf) {
+		osmo_sbit2ubit(buf, cD, LEN_CC);
+		osmo_ubit2pbit(cc_buf, buf, LEN_CC);
+	}
+	if (crc_buf) {
+		osmo_ubit2pbit(crc_buf, uD, LEN_CRC);
+	}
 
 	return crc_error;
 }
@@ -257,24 +281,27 @@ int xcch_decode(uint8_t *data_buf, const uint8_t *bursts)
  * burst_buf [out] has to be able to hold 8*116 ubits generated bursts.
  * data [in] pointer to the start of the 184 bit message data.
  */
-int facch_encode(const uint8_t *data, uint8_t *burst_buf)
+int facch_encode(const uint8_t *data, uint8_t *burst_buf, uint8_t *il_buf,
+                 uint8_t *cc_buf, uint8_t *crc_buf)
 {
 	int tail_index, i;
 	ubit_t h = 1;
-	ubit_t uD[184+40+4]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	ubit_t cD[4*114]; // buffer for convolutional coded data
-	ubit_t iD[8*116]; // buffer for interleaved data
-	ubit_t eD[8*116] = {0}; // buffer for the 8 * 116 bit mapped bursts
+	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	ubit_t cD[LEN_CC]; // buffer for convolutional coded data
+	ubit_t iD[LEN_INTERLEAVED_FACCH]; // buffer for interleaved data
+	ubit_t eD[LEN_BURSTMAP_FACCH] = {0}; // buffer for the 8 * 116 bit mapped bursts
 	// TODO: it should not matter id eD is initialized with zeros, but it does change the outcome randomly! It probably has sth. to do with the interleavin and mapping to 8 blocks instead of 4.
 
 	// get unpacked bit buffer from message data
 	osmo_pbit2ubit(uD, data, 184);
 
 	// calculate and set firecode parity bits
-	osmo_crc64gen_set_bits(&gsm0503_fire_crc40, uD, 184, &uD[184]);
+	osmo_crc64gen_set_bits(&gsm0503_fire_crc40, uD, LEN_PLAIN,
+	                       &uD[LEN_PLAIN]);
 
 	// set tailbits to 0
-	for (tail_index = 224; tail_index <= 227; ++tail_index) {
+	for (tail_index = LEN_CRC - 4; tail_index <= LEN_CRC - 1;
+	                ++tail_index) {
 		uD[tail_index] = 0;
 	}
 
@@ -286,11 +313,20 @@ int facch_encode(const uint8_t *data, uint8_t *burst_buf)
 
 	// map each data block on a burst. h is 1 for facch.
 	for (i = 0; i < 8; i++) {
-		gsm0503_tch_burst_map(&iD[i * 114], &eD[i * 116], &h,
-		                       i >= 4);
+		gsm0503_tch_burst_map(&iD[i * 114], &eD[i * 116], &h, i >= 4);
 	}
 
-	osmo_ubit2pbit(burst_buf, eD, 8 * 116);
+	osmo_ubit2pbit(burst_buf, eD, LEN_BURSTMAP_FACCH);
+
+	if (il_buf) {
+		osmo_ubit2pbit(il_buf, uD, LEN_INTERLEAVED_FACCH);
+	}
+	if (cc_buf) {
+		osmo_ubit2pbit(cc_buf, cD, LEN_CC);
+	}
+	if (crc_buf) {
+		osmo_ubit2pbit(crc_buf, uD, LEN_CRC);
+	}
 
 	return 0;
 }
@@ -307,41 +343,53 @@ int facch_encode(const uint8_t *data, uint8_t *burst_buf)
  * bursts [in] pointer to an array of the 8*116 ubit burst data.
  * data_buf [out] has to be able to hold 184 bit message data
  */
-int facch_decode(uint8_t *data_buf, const uint8_t *bursts)
+int facch_decode(uint8_t *data_buf, const uint8_t *bursts, uint8_t *il_buf,
+                 uint8_t *cc_buf, uint8_t *crc_buf)
 {
 	int i, crc_error, steal = 0;
 	sbit_t h; // buffer for h, the stealing flag
-	ubit_t uD[184+40+4]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	sbit_t cD[4*114]; // buffer for convolutional coded data
-	sbit_t iD[8*114]; // buffer for interleaved data
-	sbit_t eD[8*116]; // buffer for the 8 * 116 bit mapped bursts
-	ubit_t eD_u[8*116]; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	sbit_t cD[LEN_CRC]; // buffer for convolutional coded data
+	sbit_t iD[LEN_INTERLEAVED_FACCH]; // buffer for interleaved data
+	sbit_t eD[LEN_BURSTMAP_FACCH]; // buffer for the 8 * 116 bit mapped bursts
+	ubit_t buf[LEN_BURSTMAP_FACCH]; // buffer for the 4 * 116 bit mapped bursts
 
 	// convert ubits to sbits for further processing
-	osmo_pbit2ubit(eD_u, bursts, 8*116);
-	osmo_ubit2sbit(eD, eD_u, 8*116);
+	osmo_pbit2ubit(buf, bursts, LEN_BURSTMAP_FACCH);
+	osmo_ubit2sbit(eD, buf, LEN_BURSTMAP_FACCH);
 
 	for (i = 0; i < 8; i++) {
 		// stealing flag should be set to 1 for facch
-		gsm0503_tch_burst_unmap(&iD[i * 114], &eD[i * 116], &h,
-		                         i >= 4);
+		gsm0503_tch_burst_unmap(&iD[i * 114], &eD[i * 116], &h, i >= 4);
 		steal -= h;
 	}
 
 	gsm0503_tch_fr_deinterleave(cD, iD);
 
-	if(steal <= 0) {
+	if (steal <= 0) {
 		fprintf(stderr, "error with stealing flags in FACCH");
 		return 1;
 	}
 	// FACCH is encoded the same as the other signaling channels
 	osmo_conv_decode(&gsm0503_xcch, cD, uD);
 
-	crc_error = osmo_crc64gen_check_bits(&gsm0503_fire_crc40, uD, 184,
-	                                     &uD[184]);
+	crc_error = osmo_crc64gen_check_bits(&gsm0503_fire_crc40, uD, LEN_PLAIN,
+	                                     &uD[LEN_PLAIN]);
 
 	// unpack bits to output buffer
-	osmo_ubit2pbit(data_buf, uD, 184);
+	osmo_ubit2pbit(data_buf, uD, LEN_PLAIN);
+
+	if (il_buf) {
+		osmo_sbit2ubit(buf, iD, LEN_INTERLEAVED_FACCH);
+		osmo_ubit2pbit(il_buf, buf, LEN_INTERLEAVED_FACCH);
+	}
+	if (cc_buf) {
+		osmo_sbit2ubit(buf, cD, LEN_CC);
+		osmo_ubit2pbit(cc_buf, buf, LEN_CC);
+	}
+	if (crc_buf) {
+		osmo_ubit2pbit(crc_buf, uD, LEN_CRC);
+	}
 
 	return crc_error;
 }

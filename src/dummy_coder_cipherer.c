@@ -2,6 +2,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <osmocom/core/utils.h>
+#include <osmocom/core/conv.h>
 
 #include <coder.h>
 #include <cipherer.h>
@@ -16,24 +17,44 @@
 #define HEX_FILE_LINE_LEN 32
 
 static int ciphering = 1;
+static int encode = 1;
 static char* data_path = "hex_data";
+static char* data_type = SUFFIX_PLAIN;
 static int input_len = -1;
-static int substep_output = 0;
 static char path_buf[100];
 
 static enum mode {
-	ENCODE_XCCH_FACCH, DECODE_XCCH, DECODE_FACCH, UNDEFINED
-} mode = UNDEFINED;
+	PLAIN_ENCODE,
+	BURSTMAP_DECODE_XCCH,
+	BURSTMAP_DECODE_FACCH,
+	CRC_ENCODE,
+	CRC_DECODE,
+	IL_ENCODE_XCCH,
+	IL_DECODE_XCCH,
+	CC_ENCODE,
+	CC_DECODE,
+	IL_ENCODE_FACCH,
+	IL_DECODE_FACCH,
+	MODE_UNDEFINED
+} mode = MODE_UNDEFINED;
 
 static void handle_options(int argc, char **argv)
 {
 	while (1) {
 		int option_index = 0, c;
-		static struct option long_options[] = {{
-		        "no-ciphering", no_argument, &ciphering, 0}, {
-		        "data-path", required_argument, 0, 'p'}, {
-		        "substep-output", no_argument, &substep_output, 1}, {
-		        0, 0, 0, 0}, };
+		static struct option long_options[] =
+		                {
+		                        {
+		                                "no-ciphering", no_argument,
+		                                &ciphering, 0}, {
+		                                "data-path", required_argument,
+		                                0, 'p'}, {
+		                                "encode", no_argument, &encode,
+		                                1}, {
+		                                "decode", no_argument, &encode,
+		                                0}, {
+		                                "input-type", required_argument,
+		                                0, 't'}, {0, 0, 0, 0}, };
 
 		c = getopt_long(argc, argv, "p:", long_options, &option_index);
 		if (c == -1)
@@ -42,6 +63,9 @@ static void handle_options(int argc, char **argv)
 		switch (c) {
 		case 'p':
 			data_path = optarg;
+			break;
+		case 't':
+			data_type = optarg;
 			break;
 		default:
 			break;
@@ -58,17 +82,30 @@ int is_hex_char(char c)
 void set_mode()
 {
 	switch (input_len) {
-	case 184:
-		mode = ENCODE_XCCH_FACCH;
+	case LEN_PLAIN:
+		mode = PLAIN_ENCODE;
 		break;
-	case 4 * 116:
-		mode = DECODE_XCCH;
+	case LEN_CRC:
+		mode = encode ? CRC_ENCODE : CRC_DECODE;
 		break;
-	case 8 * 116:
-		mode = DECODE_FACCH;
+	case LEN_CC:
+		if (strcmp(data_type, "il") == 0) {
+			mode = encode ? IL_ENCODE_XCCH : IL_DECODE_XCCH;
+		} else {
+			mode = encode ? CC_ENCODE : CC_DECODE;
+		}
+		break;
+	case LEN_INTERLEAVED_FACCH:
+		mode = encode ? IL_ENCODE_FACCH : IL_DECODE_FACCH;
+		break;
+	case LEN_BURSTMAP_XCCH:
+		mode = BURSTMAP_DECODE_XCCH;
+		break;
+	case LEN_BURSTMAP_FACCH:
+		mode = BURSTMAP_DECODE_FACCH;
 		break;
 	default:
-		mode = UNDEFINED;
+		mode = MODE_UNDEFINED;
 		break;
 	}
 }
@@ -123,17 +160,57 @@ void write_file(char * path, uint8_t * data_buf, int len_bytes)
 	fclose(fp);
 }
 
-char* getPath(char* base_path, char* suffix1, char* suffix2)
+char* get_path(char* base_path, char* suffix1, char* suffix2)
 {
 	strncpy(path_buf, base_path, strlen(base_path) + 1);
 	strcat(strcat(path_buf, suffix1), suffix2);
 	return path_buf;
 }
 
+void write_files(uint8_t *plain, uint8_t *crc, uint8_t *cc, uint8_t *il_facch,
+                 uint8_t *il_xcch, uint8_t *burstmap_facch,
+                 uint8_t *burstmap_xcch)
+{
+
+	if (plain) {
+		write_file(get_path(data_path, SUFFIX_FACCH,
+		SUFFIX_PLAIN),
+		           plain, LEN_PLAIN);
+	}
+	if (crc) {
+		write_file(get_path(data_path, "", SUFFIX_CRC), crc,
+		LEN_CRC + 4);
+	}
+	if (cc) {
+		write_file(get_path(data_path, "", SUFFIX_CC), cc,
+		LEN_CC);
+	}
+	if (il_xcch) {
+		write_file(get_path(data_path, SUFFIX_XCCH,
+		SUFFIX_INTERLEAVED),
+		           il_xcch, LEN_INTERLEAVED_XCCH);
+	}
+	if (il_xcch) {
+		write_file(get_path(data_path, SUFFIX_FACCH,
+		SUFFIX_INTERLEAVED),
+		           il_facch, LEN_INTERLEAVED_FACCH);
+	}
+	if (burstmap_xcch) {
+		write_file(get_path(data_path, SUFFIX_XCCH,
+		SUFFIX_BURSTMAP),
+		           burstmap_xcch, LEN_BURSTMAP_XCCH);
+	}
+	if (burstmap_facch) {
+		write_file(get_path(data_path, SUFFIX_FACCH,
+		SUFFIX_BURSTMAP),
+		           burstmap_facch, LEN_BURSTMAP_FACCH);
+	}
+}
+
 int main(int argc, char **argv)
 {
 
-	uint8_t input_data_buf[input_len];
+	uint8_t input_buf[input_len];
 	uint8_t burstmap_xcch[LEN_BURSTMAP_XCCH / 8];
 	uint8_t il_xcch[LEN_INTERLEAVED_XCCH / 8];
 	uint8_t burstmap_facch[LEN_BURSTMAP_FACCH / 8];
@@ -145,75 +222,75 @@ int main(int argc, char **argv)
 
 	handle_options(argc, argv);
 
-	parse_file(input_data_buf);
+	parse_file(input_buf);
 
 	set_mode();
 
 	switch (mode) {
-	case ENCODE_XCCH_FACCH:
-		xcch_encode(input_data_buf, burstmap_xcch, il_xcch, cc, crc);
-		facch_encode(input_data_buf, burstmap_facch, il_facch, NULL,
+	case PLAIN_ENCODE:
+		xcch_encode(PLAIN, input_buf, burstmap_xcch, il_xcch, cc, crc);
+		facch_encode(PLAIN, input_buf, burstmap_facch, il_facch, NULL,
+		NULL);
+		write_files(NULL, crc, cc, il_facch, il_xcch, burstmap_facch,
+		            burstmap_xcch);
+		break;
+	case CRC_ENCODE:
+		xcch_encode(CRC, input_buf, burstmap_xcch, il_xcch, cc, NULL);
+		facch_encode(CRC, input_buf, burstmap_facch, il_facch, NULL,
 		             NULL);
-		if (ciphering) {
-			// TODO encrypt the coded data buffers
-		}
-		write_file(getPath(data_path, SUFFIX_XCCH, SUFFIX_BURSTMAP),
-		           burstmap_xcch, LEN_BURSTMAP_XCCH);
-		write_file(getPath(data_path, SUFFIX_FACCH, SUFFIX_BURSTMAP),
-		           burstmap_facch, LEN_BURSTMAP_FACCH);
-		if (substep_output) {
-			write_file(getPath(data_path, SUFFIX_XCCH,
-			                   SUFFIX_INTERLEAVED),
-			           il_xcch, LEN_INTERLEAVED_XCCH);
-			write_file(getPath(data_path, SUFFIX_FACCH,
-			                   SUFFIX_INTERLEAVED),
-			           il_facch, LEN_INTERLEAVED_FACCH);
-			write_file(getPath(data_path, "", SUFFIX_CC), cc,
-			           LEN_CC);
-			write_file(getPath(data_path, "", SUFFIX_CRC), crc,
-			           LEN_CRC + 4);
-		}
+		write_files(NULL, NULL, cc, il_facch, il_xcch, burstmap_facch,
+		            burstmap_xcch);
 		break;
-	case DECODE_XCCH:
-		if (ciphering) {
-			// TODO decipher the input data buffer
-		}
-		xcch_decode(plain, input_data_buf, il_xcch, cc, crc);
-		write_file(getPath(data_path, SUFFIX_XCCH, SUFFIX_PLAIN), plain,
-		           LEN_PLAIN);
-		if (substep_output) {
-			write_file(getPath(data_path, SUFFIX_XCCH,
-			                   SUFFIX_INTERLEAVED),
-			           il_xcch, LEN_INTERLEAVED_XCCH);
-			write_file(getPath(data_path, "", SUFFIX_CC), cc,
-			           LEN_CC);
-			write_file(getPath(data_path, "", SUFFIX_CRC), crc,
-			           LEN_CRC + 4);
-		}
+	case CC_ENCODE:
+		xcch_encode(CC, input_buf, burstmap_xcch, il_xcch, NULL, NULL);
+		facch_encode(CC, input_buf, burstmap_facch, il_facch, NULL,
+		             NULL);
+		write_files(NULL, NULL, NULL, il_facch, il_xcch, burstmap_facch,
+		            burstmap_xcch);
 		break;
-	case DECODE_FACCH:
-		if (ciphering) {
-			// TODO decipher the input data buffer
-		}
-		facch_decode(plain, input_data_buf, il_facch, cc, crc);
-		write_file(getPath(data_path, SUFFIX_FACCH, SUFFIX_PLAIN),
-		           plain, LEN_PLAIN);
-		if (substep_output) {
-			write_file(getPath(data_path, SUFFIX_FACCH,
-			                   SUFFIX_INTERLEAVED),
-			           il_facch, LEN_INTERLEAVED_FACCH);
-			write_file(getPath(data_path, "", SUFFIX_CC), cc,
-			           LEN_CC);
-			write_file(getPath(data_path, "", SUFFIX_CRC), crc,
-			           LEN_CRC + 4);
-		}
+	case IL_ENCODE_XCCH:
+		xcch_encode(IL_XCCH, input_buf, burstmap_xcch, NULL, NULL,
+		            NULL);
+		write_files(NULL, NULL, NULL, NULL, NULL, NULL, burstmap_xcch);
 		break;
-	case UNDEFINED:
+	case IL_ENCODE_FACCH:
+		xcch_encode(IL_FACCH, input_buf, burstmap_facch, NULL, NULL,
+		            NULL);
+		write_files(NULL, NULL, NULL, NULL, NULL, burstmap_facch,
+		NULL);
+		break;
+	case CRC_DECODE:
+		xcch_decode(CC, input_buf, NULL, NULL, NULL, plain);
+		write_files(plain, NULL, NULL, NULL, NULL, NULL, NULL);
+		break;
+	case CC_DECODE:
+		xcch_decode(CC, input_buf, NULL, NULL, crc, plain);
+		write_files(plain, crc, NULL, NULL, NULL, NULL, NULL);
+		break;
+	case IL_DECODE_XCCH:
+		xcch_decode(IL_FACCH, input_buf, NULL, cc, crc, plain);
+		write_files(plain, crc, cc, NULL, NULL, NULL, NULL);
+		break;
+	case IL_DECODE_FACCH:
+		facch_decode(IL_FACCH, input_buf, NULL, cc, crc, plain);
+		write_files(plain, crc, cc, NULL, NULL, NULL, NULL);
+		break;
+	case BURSTMAP_DECODE_XCCH:
+		xcch_decode(BURSTMAP_XCCH, input_buf, il_xcch, cc, crc, plain);
+		write_files(plain, crc, cc, NULL, il_xcch, NULL,
+		NULL);
+		break;
+	case BURSTMAP_DECODE_FACCH:
+		facch_decode(BURSTMAP_FACCH, input_buf, il_facch, cc, crc,
+		             plain);
+		write_files(plain, crc, cc, il_facch, NULL, NULL,
+		NULL);
+		break;
+	case MODE_UNDEFINED:
 		fprintf(stderr, "Invalid data length of %d - exit. ",
 		        input_len);
 		exit(EXIT_FAILURE);
 		break;
 	}
-	// not reached
 	return EXIT_SUCCESS;
 }

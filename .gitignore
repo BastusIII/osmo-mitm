@@ -33,3 +33,10 @@ src/osmomitm
 /.cproject
 /.project
 /.settings/
+
+# generated files
+*.il
+*.burstmap
+*.cc
+*.crc
+*.plain

@@ -55,8 +55,9 @@ res_data = hexstr_print_format(binascii.hexlify(xor_bytes))
 res_file = open(res_path, 'w')
 res_file.write(res_data)
 
-print hexstr_print_format(f1_data_cleaned) + ' --> ' + f1_name
-print hexstr_print_format(f2_data_cleaned) + ' --> ' + f2_name
-print res_data 				   + ' --> ' + res_name
+print hexstr_print_format(f1_data_cleaned) + ' = ' + f1_name
+print hexstr_print_format(f2_data_cleaned) + ' = ' + f2_name 
+print res_data 				   + ' = ' + f1_name + ' XOR ' + f2_name
+print ''
 
 

@@ -154,10 +154,10 @@ int xcch_encode(const enum data_type type, const uint8_t *input,
 {
 	int tail_index, i;
 	ubit_t hu = 1, hl = 1;
-	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	ubit_t cD[LEN_CC]; // buffer for convolutional coded data
-	ubit_t iD[LEN_INTERLEAVED_XCCH]; // buffer for interleaved data
-	ubit_t eD[LEN_BURSTMAP_XCCH]; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t uD[LEN_CRC] = {0}; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	ubit_t cD[LEN_CC] = {0}; // buffer for convolutional coded data
+	ubit_t iD[LEN_INTERLEAVED_XCCH] = {0}; // buffer for interleaved data
+	ubit_t eD[LEN_BURSTMAP_XCCH] = {0}; // buffer for the 4 * 116 bit mapped bursts
 
 	// get unpacked bit buffer from message data
 	switch (type) {
@@ -203,10 +203,10 @@ int xcch_encode(const enum data_type type, const uint8_t *input,
 		}
 	}
 
-	osmo_ubit2pbit(burst_buf, eD, 4 * 116);
+	osmo_ubit2pbit(burst_buf, eD, LEN_BURSTMAP_XCCH);
 
 	if (il_buf) {
-		osmo_ubit2pbit(il_buf, uD, LEN_INTERLEAVED_FACCH);
+		osmo_ubit2pbit(il_buf, iD, LEN_INTERLEAVED_XCCH);
 	}
 	if (cc_buf) {
 		osmo_ubit2pbit(cc_buf, cD, LEN_CC);
@@ -224,11 +224,11 @@ int xcch_decode(const enum data_type input_type, const uint8_t *input,
 {
 	int i, crc_error;
 	sbit_t hu, hl; // buffer for hl and hn values returned by unmapping
-	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	sbit_t cD[LEN_CC]; // buffer for convolutional coded data
-	sbit_t iD[LEN_INTERLEAVED_FACCH]; // buffer for interleaved data
-	sbit_t eD[LEN_BURSTMAP_XCCH]; // buffer for the 4 * 116 bit mapped bursts
-	ubit_t buf[LEN_BURSTMAP_XCCH]; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t uD[LEN_CRC] = {0}; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	sbit_t cD[LEN_CC] = {0}; // buffer for convolutional coded data
+	sbit_t iD[LEN_INTERLEAVED_FACCH] = {0}; // buffer for interleaved data
+	sbit_t eD[LEN_BURSTMAP_XCCH] = {0}; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t buf[LEN_BURSTMAP_XCCH] = {0}; // buffer for the 4 * 116 bit mapped bursts
 
 	// get unpacked bit buffer from message data
 	switch (input_type) {
@@ -253,7 +253,7 @@ int xcch_decode(const enum data_type input_type, const uint8_t *input,
 		return -1;
 	}
 
-	if (input_type > IL_FACCH) {
+	if (input_type > IL_XCCH) {
 		for (i = 0; i < 4; i++) {
 			// hu and hl can be savely ignored, they are always 1
 			gsm0503_xcch_burst_unmap(&iD[i * 114], &eD[i * 116],
@@ -295,11 +295,10 @@ int facch_encode(const enum data_type type, const uint8_t *input,
 {
 	int tail_index, i;
 	ubit_t h = 1;
-	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	ubit_t cD[LEN_CC]; // buffer for convolutional coded data
-	ubit_t iD[LEN_INTERLEAVED_FACCH]; // buffer for interleaved data
+	ubit_t uD[LEN_CRC] = {0}; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	ubit_t cD[LEN_CC] = {0}; // buffer for convolutional coded data
+	ubit_t iD[LEN_INTERLEAVED_FACCH] = {0}; // buffer for interleaved data
 	ubit_t eD[LEN_BURSTMAP_FACCH] = {0}; // buffer for the 8 * 116 bit mapped bursts
-	// TODO: it should not matter id eD is initialized with zeros, but it does change the outcome randomly! It probably has sth. to do with the interleavin and mapping to 8 blocks instead of 4.
 
 	// get unpacked bit buffer from message data
 	switch (type) {
@@ -348,7 +347,7 @@ int facch_encode(const enum data_type type, const uint8_t *input,
 	osmo_ubit2pbit(burst_buf, eD, LEN_BURSTMAP_FACCH);
 
 	if (il_buf) {
-		osmo_ubit2pbit(il_buf, uD, LEN_INTERLEAVED_FACCH);
+		osmo_ubit2pbit(il_buf, iD, LEN_INTERLEAVED_FACCH);
 	}
 	if (cc_buf) {
 		osmo_ubit2pbit(cc_buf, cD, LEN_CC);
@@ -366,11 +365,11 @@ int facch_decode(const enum data_type input_type, const uint8_t *input,
 {
 	int i, crc_error, steal = 0;
 	sbit_t h; // buffer for h, the stealing flag
-	ubit_t uD[LEN_CRC]; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
-	sbit_t cD[LEN_CRC]; // buffer for convolutional coded data
-	sbit_t iD[LEN_INTERLEAVED_FACCH]; // buffer for interleaved data
-	sbit_t eD[LEN_BURSTMAP_FACCH]; // buffer for the 8 * 116 bit mapped bursts
-	ubit_t buf[LEN_BURSTMAP_FACCH]; // buffer for the 4 * 116 bit mapped bursts
+	ubit_t uD[LEN_CRC] = {0}; // buffer for 184 bit data + 40 bits crc + 4 zero bits tail
+	sbit_t cD[LEN_CC] = {0}; // buffer for convolutional coded data
+	sbit_t iD[LEN_INTERLEAVED_FACCH] = {0}; // buffer for interleaved data
+	sbit_t eD[LEN_BURSTMAP_FACCH] = {0}; // buffer for the 8 * 116 bit mapped bursts
+	ubit_t buf[LEN_BURSTMAP_FACCH] = {0}; // buffer for the 4 * 116 bit mapped bursts
 
 	// get unpacked bit buffer from message data
 	switch (input_type) {

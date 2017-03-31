@@ -1,0 +1,69 @@
+
+[24 bit] LAPDM-Header, Format A 					-> GSM-TS 04.06 - 2
+01 				= [8 bit, M] Adress Field 		-> GSM-TS 04.06 - 3.2
+20 				= [8 bit, M] Control Field, I Format 	-> GSM-TS 04.06 - 3.4.1
+51 				= [8 bit, M] Length Field 		-> GSM-TS 04.06 - 3.6
+
+[160 bit] GSM_A-DTAP, Setup message 					-> GSM-TS 24.008 - 9.3.23.2 
+0 				= [4 bit, M] Transaction Identifier	-> GSM-TS 24.008 - 10.3.2 
+3				= [4 bit, M] Protocol Discriminator 	-> GSM-TS 24.008 - 10.2
+45				= [8 bit, M] Message Type		-> GSM-TS 24.008 - 10.4	
+-				= [8 bit, O] Repeat Indicator		-> GSM-TS 24.008 - 10.5.4.22
+04 04 60 02 00 81 		= [24 - 128 bit, M] Bearer Capability 1 -> GSM-TS 24.008 - 10.5.4.5
+-		 		= [24 - 128 bit, O] Bearer Capability 2 -> GSM-TS 24.008 - 10.5.4.5
+-		 		= [16 - X bit, O] Facility 		-> GSM-TS 24.008 - 10.5.4.15, GSM-TS 24.010
+-		 		= [16 - 184 bit, O] Calling Party  	-> GSM-TS 24.008 - 10.5.4.10
+			  			    Subaddr.
+5e 07 81 10 57 81 81 81 81      = [24 - 354 bit, M] Called Party number	-> GSM-TS 24.008 - 10.5.4.7
+-		 		= [16 - 184 bit, O] Called Party  	-> GSM-TS 24.008 - 10.5.4.8
+			  			    Subaddr.
+.
+.
+.
+15 01 01			= [24 - 32 bit, O] Call Control Capab.	-> GSM-TS 24.008 - 10.5.4.5a
+
+
+
+
+
+
+
+
+
+Notes: 
+- Telefonnummern sind im BCD (Binary Coded Decimal) Format angegeben
+	-> jede Dezimalzahl wird durch 4 Bit repräsentiert
+	-> Bsp: 0157 == 0001(1) 0000(0) 0111(7) 0101(5)
+- Call Setup kann sich über mehrere LAPDM Fragments verteilen.
+- Variable und optionale Elemente vor Called Party Number können deren Position verändern
+	-> Repeat Indicator
+		- nur verwendet wenn Bearer Capability 2 vorhanden
+	-> Bearer Capability 1 + 2
+		- Bearer Capability 2 kann zusätzlich zu 1 angegeben werden um eine Fallback Capability anzugeben, 
+		  falls 1 nicht kompatibel --> kann wohl angenommen werden dass das nicht benutzt wird
+		- variable Länge!
+		- wenn alles standard ist sind keine bits ausser 3 nötig. Dann hat die Bearer Capability Länge 3.
+		- bit 3a wird benutzt um weitere speech encoding capabilities anzugeben, z.B. full rate version 1, 2, Half rate Version 1, 2, ... Mit 3a haben die Bearer Capabilities länge 4
+	-> Facility
+		- may be included for functional operation of supplementary services
+		- es gibt eine message DTAP control message Type 0x3a -> Facility, in der das Netzwerk dem MS Infos zur Facility ausliefert
+	-> Analysieren ob diese Elemente häufig verwendet werden und wenn, mit welchen Längen
+- Calling Party number kann stolze 43 Byte = 354 bit lang sein und sich somit über bis zu 3 LAPDM Fragmente verteilen. Diese maximale Größe wird allerdings nicht benutzt. Die number ist idR. (11 (nationale Nummer) + 4 (für 0049)) Byte lang, was für das Feld 15+1byte length+1byte type+1byte +1byte numberingplan info etc = 18 Btye bei internationaler vorwahl ergibt. Bei nationaler Vorwahl also 15. PCS 1900 ist das absolute limit des Felds auf 19 byte gesetzt. (Table 10.5.118/3GPP TS 24.008)
+	-> Infos zu Telefonnummern verschiedener Länder 
+		- https://en.wikipedia.org/wiki/List_of_mobile_phone_number_series_by_country
+		- http://www.wtng.info/wtng-cod.html
+	-> die Wikipediainfos sind veraltet... siehe https://www.bundesnetzagentur.de/SharedDocs/Downloads/DE/Sachgebiete/Telekommunikation/Unternehmen_Institutionen/Nummerierung/Rufnummern/Mobile%20Dienste/NummernplanMobileDienste.pdf?__blob=publicationFile&v=8
+	-> Rufnummernnetzplan Deutschland Zuammenfassung:
+		- Nummernteilbereich (0)15
+		  [2 Ziffern Dienstekennzahl][9 Ziffern Teilnehmerrufnummer]
+		- Nummernteilbereiche (0)160, (0)162, (0)163 und (0)17
+		  [2 Ziffern Dienstekennzahl][8oder 9 Ziffern Teilnehmerrufnummer]
+	-> i.d.R sieht eine mobile Tel. in Deutschland lt. Nummernplan so aus
+		- REGEX: 0(049){0,1}((1[5|7]([0-9]{9}))|(16([023][0-9]{7,8})))
+		- internationale Rufnummern (0049) haben 14-15 Ziffern
+		- lokale Rufnummern (0) haben 11 - 12 Ziffern
+- Wir haben ein Einschränkung bei der Attacke, wir konnen die Tel nur durch eine Tel gleicher Länge ersetzen. Wenn wir das nicht machen und stattdessen das length field der tel anpassen würden wir 
+1. Entweder Daten überschreiben aus Feldern dahinter oder die restbits einer längeren tel würden als anfang der Felder dahinter interpretiert werden
+2. bei verlängerung der tel würde die in lapdm gesetzte länge nicht mehr passen (falls nicht max length) und es würdem die letzten bits ignoriert werden
+3. das paket würde aufgrund von fehlern (vermutlich) ignoriert werden
+	-> wir brauchen 2 telefonnummern unterschiedlicher länge auf die unser attecker handy hört

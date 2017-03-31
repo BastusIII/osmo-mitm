@@ -1,0 +1,111 @@
+Haben: 
+ciph(cc(crc_r(data))) -> ciphertext
+(data XOR data_manip) -> kann durch known plaintext berechnet werden
+crc_r(data XOR data_manip) -> kann berechnet werden
+cc(crc_r(data XOR data_manip)) -> kann berechnet werden
+remainder -> remainder mit dem crc parity bits verXORt werden, bekannt
+cc(remainder) -> kann berechnet werden
+
+Wollen:
+ciph(cc(crc_r(data_manip))) -> ciphertext der manipulierten daten
+
+Kriegen:
+data_manip = data XOR (data_manip XOR data)
+
+-----DEFINITION------
+Linearität von CRCs: 
+CRC(a XOR b) = CRC(a) XOR CRC(b)
+=> CRC(a) = CRC(a XOR b) XOR CRC(b)
+=> CRC(b) = CRC(a XOR b) XOR CRC(a)
+---------------------
+
+-----EINSCHUB--------
+CRC mit Nachbearbeitung - CRC mit remainder
+CRC_R(a) := CRC(a) XOR r
+=> CRC_R(a) XOR CRC_R(b) = CRC(a) XOR r XOR CRC(b) XOR r = CRC(a) XOR CRC(b)
+=> CRC_R(a XOR b) = CRC(a XOR b) XOR r != CRC_R(a) XOR CRC_R(b)
+
+Was nun gilt ist:
+CRC_R(a XOR b) = CRC(a XOR b) XOR r = CRC(a) XOR CRC(b) XOR r = CRC_R(a) XOR CRC_R(b) XOR r 
+---------------------
+
+crc_r(data_manip) = crc_r(data XOR (data_manip XOR data)) 
+                = crc_r(data) XOR crc_r(data_manip XOR data) XOR remainder
+
+-----DEFINITION------
+Linearität von Convolutional Codes: 
+CC(a XOR b) = CC(a) XOR CC(b)
+=> CC(a) = CC(a XOR b) XOR CC(b)
+=> CC(b) = CC(a XOR b) XOR CC(a)
+---------------------
+
+cc(crc_r(data_manip)) = cc(crc_r(data) XOR crc_r(data_manip XOR data) XOR remainder) 
+                    = cc(crc_r(data)) XOR cc(crc_r(data_manip XOR data) XOR remainder))
+		    = cc(crc_r(data)) XOR cc(crc_r(data_manip XOR data))  XOR cc(remainder)
+
+ciph(cc(crc_r(data_manip))) = ciph(cc(crc_r(data)) XOR cc(crc_r(data_manip XOR data) XOR remainder))) 
+                          = ciph(cc(crc_r(data))) XOR cc(crc_r(data_manip XOR data) XOR remainder)
+
+
+Beispiel CRC mit remainder an NULL data:
+
+crc = (D²³ + 1)*(D¹⁷ + D³ + 1)
+    = D⁴⁰ + D²⁶ + D²³ + D¹⁷ + D³ + 1
+      43     39   35   31   27   23   19   15   11   7    3
+    = (0001) 0000 0000 0000 0100 1000 0010 0000 0000 0000 1001
+    = (1)    00        04        82        00        01
+    = (1)    00 04 82 00 01
+
+Berechnung CRC durch binäre Division
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 / 00 04 82 00 01 = 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+Wir haben einen remainder definiert! Dieser ist für den Fire Code ff ff ff ff ff. (siehe. GSM TS 05.03)
+Die berechneten 40 Paritätsbits werden zuletzt noch mit diesem verXORt.
+
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 XOR
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff ff ff ff ff =
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff ff ff ff ff
+
+
+Beispiel Berechnen von manipuliertem Ciphertext:
+
+
+01 20 51 03 45 04 04 60 02 00 81 5e 07 81 10 57 81 81 81 81 15 01 01  = data
+01 20 51 03 45 04 04 60 02 00 81 5e 07 81 10 57 11 81 81 81 15 01 01  = data_manip
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 90 00 00 00 00 00 00  = data XOR data_manip
+
+
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 90 00 00 00 00 00 00 2f 93 7e 5f 2f 00  = crc_r(data XOR data_manip)
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff ff ff ff ff 00  = remainder
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 90 00 00 00 00 00 00 d0 6c 81 a0 d0 00  = crc_r(data XOR data_manip) XOR remainder
+01 20 51 03 45 04 04 60 02 00 81 5e 07 81 10 57 81 81 81 81 15 01 01 f8 b8 1c ef e5 00  = crc_r(data)
+01 20 51 03 45 04 04 60 02 00 81 5e 07 81 10 57 11 81 81 81 15 01 01 28 d4 9d 4f 35 00  = crc_r(data XOR data_manip) XOR remainder XOR crc_r(data)
+01 20 51 03 45 04 04 60 02 00 81 5e 07 81 10 57 11 81 81 81 15 01 01 28 d4 9d 4f 35 00  = crc_r(data_manip)
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  = crc_r(data XOR data_manip) XOR remainder XOR crc_r(data) XOR crc_r(data_manip)
+TEST1 - CHECK == 0! OK
+
+
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 d0 8f 00 00 00 00 00 00 00 00 00 00 00 00 0d d5 93 81 49 69 3b 56 4e d5 43  = cc(crc_r(data XOR data_manip))
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 e9 aa aa aa aa aa aa aa aa aa 43  = cc(remainder)
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 d0 8f 00 00 00 00 00 00 00 00 00 00 00 00 e4 7f 39 2b e3 c3 91 fc e4 7f 00  = cc(crc_r(data XOR data_manip)) XOR cc(remainder)
+00 03 42 3c 37 bc 4f 0e 47 c7 bf 34 f0 34 c9 cc 00 0d 3c 00 d3 c3 78 55 0c 3a 50 c3 4c 4f 37 85 50 c3 9c c3 9c c3 9c c3 4c 78 bf 03 4f 03 a6 90 1d 60 c3 a8 da e5 a9 3b bf  = cc(crc_r(data))
+00 03 42 3c 37 bc 4f 0e 47 c7 bf 34 f0 34 c9 cc 00 0d 3c 00 d3 c3 78 55 0c 3a 50 c3 4c 4f 37 85 80 4c 9c c3 9c c3 9c c3 4c 78 bf 03 4f 03 42 ef 24 4b 20 6b 4b 19 4d 44 bf  = cc(crc_r(data XOR data_manip)) XOR cc(remainder) XOR cc(crc_r(data))
+00 03 42 3c 37 bc 4f 0e 47 c7 bf 34 f0 34 c9 cc 00 0d 3c 00 d3 c3 78 55 0c 3a 50 c3 4c 4f 37 85 80 4c 9c c3 9c c3 9c c3 4c 78 bf 03 4f 03 42 ef 24 4b 20 6b 4b 19 4d 44 bf  = cc(crc_r(data_manip))
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  = cc(crc_r(data XOR data_manip)) XOR cc(remainder) XOR cc(crc_r(data)) XOR cc(crc_r(data_manip))
+TEST2 - CHECK == 0! OK
+00 03 42 3c 37 bc 4f 0e 47 c7 bf 34 f0 34 c9 cc 00 0d 3c 00 d3 c3 78 55 0c 3a 50 c3 4c 4f 37 85 80 4c 9c c3 9c c3 9c c3 4c 78 bf 03 4f 03 42 ef 24 4b 20 6b 4b 19 4d 44 bf  = cc(crc_r(data XOR data_manip) XOR remainder XOR crc_r(data))
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  = cc(crc_r(data XOR data_manip) XOR remainder XOR crc_r(data)) XOR cc(crc_r(data_manip))
+TEST3 - CHECK == 0! OK
+
+
+12 34 56 78 90 ab cd ef 12 34 56 78 90 ab cd ef 12 34 56 78 90 ab cd ef 12 34 56 78 90 ab cd ef 12 34 56 78 90 ab cd ef 12 34 56 78 90 ab cd ef 12 34 56 78 90 ab cd ef 11  = cipherstream
+12 37 14 44 a7 17 82 e1 55 f3 e9 4c 60 9f 04 23 12 39 6a 78 43 68 b5 ba 1e 0e 06 bb dc e4 fa 6a 42 f7 ca bb 0c 68 51 2c 5e 4c e9 7b df a8 6b 7f 0f 54 95 d0 4a 4e 64 d4 ae  = cc(crc_r(data)) XOR cipherstream = ciph(cc(crc_r(data)))
+12 37 14 44 a7 17 82 e1 55 f3 e9 4c 60 9f 04 23 12 39 6a 78 43 68 b5 ba 1e 0e 06 bb dc e4 fa 6a 92 78 ca bb 0c 68 51 2c 5e 4c e9 7b df a8 8f 00 36 7f 76 13 db b2 80 ab ae  = cc(crc_r(data_manip)) XOR cipherstream = ciph(cc(crc_r(data_manip)))
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 d0 8f 00 00 00 00 00 00 00 00 00 00 00 00 e4 7f 39 2b e3 c3 91 fc e4 7f 00  = cc(crc_r(data XOR data_manip)) XOR cc(remainder)
+12 37 14 44 a7 17 82 e1 55 f3 e9 4c 60 9f 04 23 12 39 6a 78 43 68 b5 ba 1e 0e 06 bb dc e4 fa 6a 92 78 ca bb 0c 68 51 2c 5e 4c e9 7b df a8 8f 00 36 7f 76 13 db b2 80 ab ae  = cc(crc_r(data XOR data_manip)) XOR cc(remainder) XOR cc(crc_r(data)) XOR cipherstream = cc(crc_r(data XOR data_manip)) XOR cc(remainder) XOR ciph(cc(crc_r(data)))
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  = cc(crc_r(data XOR data_manip)) XOR cc(remainder) XOR ciph(cc(crc_r(data))) XOR ciph(cc(crc_r(data_manip)))
+TEST4 - CHECK == 0! OK
+
+
+

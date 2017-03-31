@@ -19,7 +19,7 @@
 static int ciphering = 1;
 static int encode = 1;
 static char* data_path = "hex_data";
-static char* data_type = SUFFIX_PLAIN;
+static char* data_type = "plain";
 static int input_len = -1;
 static char path_buf[100];
 
@@ -42,21 +42,16 @@ static void handle_options(int argc, char **argv)
 {
 	while (1) {
 		int option_index = 0, c;
-		static struct option long_options[] =
-		                {
-		                        {
-		                                "no-ciphering", no_argument,
-		                                &ciphering, 0}, {
-		                                "data-path", required_argument,
-		                                0, 'p'}, {
-		                                "encode", no_argument, &encode,
-		                                1}, {
-		                                "decode", no_argument, &encode,
-		                                0}, {
-		                                "input-type", required_argument,
-		                                0, 't'}, {0, 0, 0, 0}, };
+		static struct option long_options[] = {
+			{"no-ciphering", no_argument, &ciphering, 0},
+			{"data-path", required_argument, 0, 'p'},
+			{"encode", no_argument, &encode, 1},
+			{"decode", no_argument, &encode, 0},
+			{"data-type", required_argument, 0, 't'},
+			{0, 0, 0, 0},
+		};
 
-		c = getopt_long(argc, argv, "p:", long_options, &option_index);
+		c = getopt_long(argc, argv, "p:t:", long_options, &option_index);
 		if (c == -1)
 			break;
 
@@ -86,6 +81,7 @@ void set_mode()
 		mode = PLAIN_ENCODE;
 		break;
 	case LEN_CRC:
+	case LEN_CRC + 4: // as len%8!=0, add 4
 		mode = encode ? CRC_ENCODE : CRC_DECODE;
 		break;
 	case LEN_CC:
@@ -173,7 +169,11 @@ void write_files(uint8_t *plain, uint8_t *crc, uint8_t *cc, uint8_t *il_facch,
 {
 
 	if (plain) {
-		write_file(get_path(data_path, SUFFIX_FACCH,
+		char* suffix_channel =
+		                (mode == BURSTMAP_DECODE_XCCH) ? SUFFIX_XCCH :
+		                (mode == BURSTMAP_DECODE_FACCH) ? SUFFIX_FACCH :
+		                                                  "";
+		write_file(get_path(data_path, suffix_channel,
 		SUFFIX_PLAIN),
 		           plain, LEN_PLAIN);
 	}
@@ -190,7 +190,7 @@ void write_files(uint8_t *plain, uint8_t *crc, uint8_t *cc, uint8_t *il_facch,
 		SUFFIX_INTERLEAVED),
 		           il_xcch, LEN_INTERLEAVED_XCCH);
 	}
-	if (il_xcch) {
+	if (il_facch) {
 		write_file(get_path(data_path, SUFFIX_FACCH,
 		SUFFIX_INTERLEAVED),
 		           il_facch, LEN_INTERLEAVED_FACCH);
@@ -237,25 +237,25 @@ int main(int argc, char **argv)
 	case CRC_ENCODE:
 		xcch_encode(CRC, input_buf, burstmap_xcch, il_xcch, cc, NULL);
 		facch_encode(CRC, input_buf, burstmap_facch, il_facch, NULL,
-		             NULL);
+		NULL);
 		write_files(NULL, NULL, cc, il_facch, il_xcch, burstmap_facch,
 		            burstmap_xcch);
 		break;
 	case CC_ENCODE:
 		xcch_encode(CC, input_buf, burstmap_xcch, il_xcch, NULL, NULL);
 		facch_encode(CC, input_buf, burstmap_facch, il_facch, NULL,
-		             NULL);
+		NULL);
 		write_files(NULL, NULL, NULL, il_facch, il_xcch, burstmap_facch,
 		            burstmap_xcch);
 		break;
 	case IL_ENCODE_XCCH:
 		xcch_encode(IL_XCCH, input_buf, burstmap_xcch, NULL, NULL,
-		            NULL);
+		NULL);
 		write_files(NULL, NULL, NULL, NULL, NULL, NULL, burstmap_xcch);
 		break;
 	case IL_ENCODE_FACCH:
 		xcch_encode(IL_FACCH, input_buf, burstmap_facch, NULL, NULL,
-		            NULL);
+		NULL);
 		write_files(NULL, NULL, NULL, NULL, NULL, burstmap_facch,
 		NULL);
 		break;

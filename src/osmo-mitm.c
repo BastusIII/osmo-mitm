@@ -6,6 +6,7 @@
 #include <osmocom/gsm/protocol/gsm_04_08.h>
 #include <osmocom/gsm/rsl.h>
 #include <osmocom/core/gsmtap_util.h>
+#include <osmocom/gsm/lapd_core.h>
 #include <coder.h>
 
 #define DEFAULT_DL_RX_GRP DEFAULT_MS_MCAST_GROUP
@@ -13,6 +14,22 @@
 #define DEFAULT_UL_RX_GRP "226.0.0.2"
 #define DEFAULT_UL_TX_GRP DEFAULT_BTS_MCAST_GROUP
 #define DEFAULT_MCAST_PORT 4729 /* IANA-registered port for GSMTAP */
+
+#define RA_EST_CAUSE_ORIG_CALL 0xd0
+#define RA_MASK_3 0xd0
+
+/* TS 04.06 Table 4 / Section 3.8.1 */
+#define LAPD_U_SABM	0x7
+#define LAPD_U_SABME	0xf
+#define LAPD_U_DM	0x3
+#define LAPD_U_UI	0x0
+#define LAPD_U_DISC	0x8
+#define LAPD_U_UA	0xC
+#define LAPD_U_FRMR	0x11
+
+#define LAPD_S_RR	0x0
+#define LAPD_S_RNR	0x1
+#define LAPD_S_REJ	0x2
 
 static char* dl_rx_grp = DEFAULT_DL_RX_GRP;
 static char* dl_tx_grp = DEFAULT_DL_TX_GRP;
@@ -24,53 +41,22 @@ static struct virt_um_inst *downlink = NULL;
 static struct virt_um_inst *uplink = NULL;
 
 static enum mitm_states {
-	STATE_RACH = 0, // Wait for RACH
-	STATE_IMM_ASS, // Wait for IMMEDIATE ASSIGNMENT
-	STATE_SABM_SERVICE_REQ, // Wait for SABM with CM SERVICE REQUEST
-	STATE_SABM_UA, // Wait for UA for SABM
+	STATE_SABM, // Wait for SABM - CM Service Request
 	STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD, // Wait for either SERVICE ACCEPT or CIPHERING MODE COMMAND
-	/* msgs are probably encrypted from here */
-	STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD_RR, // Wait for Lapdm RECEIVE READY after SERVICE ACCEPT or CIPHERING MODE COMMAND
 	STATE_SETUP, // Wait for SETUP message
-} mitm_state = STATE_RACH;
-
-// history of rancom acces request references sent on RACH
-static struct gsm48_req_ref cr_req_ref_hist[3];
+} mitm_state = STATE_SABM;
 
 static struct chan_desc {
 	uint8_t type;
 	uint8_t subchan;
 	uint8_t timeslot;
 
-} synced_chan;
+} ded_chan;
+
 static int setup_burst_counter = 0;
 
-/* match request reference agains request history */
-static int gsm48_match_ra(struct gsm48_req_ref *ref)
-{
-	int i;
-	uint8_t ia_t1, ia_t2, ia_t3;
-	uint8_t cr_t1, cr_t2, cr_t3;
-
-	for (i = 0; i < 3; i++) {
-		/* filter confirmed RACH requests only */
-		if (cr_req_ref_hist[i].ra && ref->ra == cr_req_ref_hist[i].ra) {
-		 	ia_t1 = ref->t1;
-		 	ia_t2 = ref->t2;
-		 	ia_t3 = (ref->t3_high << 3) | ref->t3_low;
-			ref = &cr_req_ref_hist[i];
-		 	cr_t1 = ref->t1;
-		 	cr_t2 = ref->t2;
-		 	cr_t3 = (ref->t3_high << 3) | ref->t3_low;
-			if (ia_t1 == cr_t1 && ia_t2 == cr_t2
-			 && ia_t3 == cr_t3) {
-				return 1;
-			}
-		}
-	}
-
-	return 0;
-}
+static uint32_t victim_tmsi = 0x1ad86f62;
+static uint64_t victim_imsi = 0x2926709347452663;
 
 static void handle_options(int argc, char **argv)
 {
@@ -112,6 +98,10 @@ static void handle_options(int argc, char **argv)
 	}
 }
 
+void manipulate_setup_message(uint8_t *msg) {
+ // TODO: manipulate message
+}
+
 static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 {
 	struct gsmtap_hdr *gh = msgb_l1(msg);
@@ -123,42 +113,11 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 	msg->l2h = msgb_pull(msg, sizeof(*gh));
 
 	switch (mitm_state) {
-	case STATE_IMM_ASS:
-		if ((gsmtap_chantype & ~GSMTAP_CHANNEL_ACCH & 0xff) == GSMTAP_CHANNEL_AGCH ||
-		    (gsmtap_chantype & ~GSMTAP_CHANNEL_ACCH & 0xff) == GSMTAP_CHANNEL_PCH) {
-			struct gsm48_system_information_type_header *sih =
-			                msgb_l2(msg);
-			struct gsm48_imm_ass *ia;
-			struct gsm48_imm_ass_ext *iae;
-			int i;
-			switch (sih->system_information) {
-			case GSM48_MT_RR_IMM_ASS:
-					ia = msgb_l2(msg);
-					if(gsm48_match_ra(&ia->req_ref)) {
-						rsl_dec_chan_nr(ia->chan_desc.chan_nr, &synced_chan.type, &synced_chan.subchan, &synced_chan.timeslot);
-						synced_chan.type = chantype_rsl2gsmtap(synced_chan.type, 0);
-						mitm_state = STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD;
-					}
-					break;
-				case GSM48_MT_RR_IMM_ASS_EXT:
-					iae = msgb_l2(msg);
-					if(gsm48_match_ra(&iae->req_ref1)) {
-						rsl_dec_chan_nr(iae->chan_desc1.chan_nr, &synced_chan.type, &synced_chan.subchan, &synced_chan.timeslot);
-						mitm_state = STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD;
-					}else if(gsm48_match_ra(&iae->req_ref2)) {
-						rsl_dec_chan_nr(iae->chan_desc2.chan_nr, &synced_chan.type, &synced_chan.subchan, &synced_chan.timeslot);
-						mitm_state = STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD;
-					}
-					break;
-				}
-			}
-			// do nothing if the incoming msg is not on agch or pch
-			break;
-		case STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD:
-			// TODO Implement CIPHERING MODE COMMAND action
-			break;
-		default:
-			break;
+	case STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD:
+		// TODO Implement CIPHERING MODE COMMAND action
+		break;
+	default:
+		break;
 	}
 
 	msgb_push(msg, sizeof(*gh));
@@ -171,7 +130,6 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 {
 	uint8_t encoded_msg[LEN_PLAIN / 8] = {0};
 	struct gsmtap_hdr *gh = msgb_l1(msg);
-	uint16_t arfcn = ntohs(gh->arfcn); // arfcn of the received msg
 	uint8_t gsmtap_chantype = gh->sub_type; // gsmtap channel type
 	uint8_t subslot = gh->sub_slot; // multiframe subslot to send msg in (tch -> 0-26, bcch/ccch -> 0-51)
 	uint8_t timeslot = gh->timeslot; // tdma timeslot to send in (0-7)
@@ -179,11 +137,35 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 	msg->l2h = msgb_pull(msg, sizeof(*gh));
 
 	switch(mitm_state) {
-		case STATE_RACH:
-			// TODO Implement RACH action
-			break;
+	case STATE_SABM:
+		if (gsmtap_chantype == GSMTAP_CHANNEL_SDCCH4 ||
+		    gsmtap_chantype == GSMTAP_CHANNEL_SDCCH8) {
+			// TODO: parse l2 ctx from l2 hdr in msg
+			struct lapd_msg_ctx lctx;
+
+			// check if we have a sabm msg
+			if(lctx.s_u == LAPD_U_SABM || lctx.s_u == LAPD_U_SABME) {
+				// TODO: parse l3 hdr from msg
+				struct gsm48_hdr l3_hdr;
+
+				if(l3_hdr.proto_discr == GSM48_PDISC_MM &&
+				   l3_hdr.msg_type == GSM48_MT_MM_CM_SERV_REQ) {
+					// TODO: parse service request from msg
+					struct gsm48_service_request sreq;
+					if(sreq.cm_service_type == GSM48_CMSERV_MO_CALL_PACKET
+					   && ((*(uint32_t *)sreq.mi) == victim_tmsi || (*(uint64_t *)sreq.mi) == victim_imsi)) { // TODO: Mobile identity is somewhat encoded and cant be compared like this here
+						// if we are here, we know that our victim requested a call establisment from the network
+						ded_chan.type = gsmtap_chantype;
+						ded_chan.timeslot = timeslot;
+						ded_chan.subchan = subslot;
+						mitm_state = STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD;
+					}
+				}
+			}
+		}
+		break;
 		case STATE_SETUP:
-			if(synced_chan.type == gsmtap_chantype && synced_chan.subchan == subslot && synced_chan.timeslot == timeslot) {
+			if(ded_chan.type == gsmtap_chantype && ded_chan.subchan == subslot && ded_chan.timeslot == timeslot) {
 				// the third message on uplink after ciphering mode command should be the setup message
 				// 1: LAPDM-Receive-Ready, 2: CIPHERING-MODE-COMPLETE, 3: SETUP
 				if(++setup_burst_counter == 3) {
@@ -191,11 +173,13 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 					xcch_encode(PLAIN, msgb_data(msg), encoded_msg, NULL, NULL, NULL);
 					manipulate_setup_message(encoded_msg);
 					xcch_decode(BURSTMAP_XCCH, encoded_msg, NULL, NULL, NULL, msgb_data(msg));
-					mitm_state = STATE_RACH;
+					mitm_state = STATE_SABM;
 				}
 				// TODO: What is if this fails?
 			}
 			// do nothing if the incoming msg is not on the synced channel
+			break;
+		default:
 			break;
 	}
 
@@ -225,8 +209,4 @@ int main(int argc, char **argv)
 
 	// not reached
 	return EXIT_FAILURE;
-}
-
-void manipulate_setup_message(uint8_t *msg) {
- // TODO: manipulate message
 }

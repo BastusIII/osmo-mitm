@@ -5,7 +5,7 @@ CFLAGS = -g -O0
 
 sbin_PROGRAMS = osmomitm dummycoder
 
-osmomitm_SOURCES = osmo-mitm.c shared/osmo_mcast_sock.c shared/virtual_um.c coder.c
+osmomitm_SOURCES = osmo-mitm.c shared/osmo_mcast_sock.c shared/virtual_um.c coder.c shared/common_util.c
 osmomitm_LDADD = $(LIBOSMOCORE_LIBS) $(LIBOSMOGSM_LIBS)
 
 dummycoder_SOURCES = dummy_coder_cipherer.c coder.c cipherer.c

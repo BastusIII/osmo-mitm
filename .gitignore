@@ -35,8 +35,9 @@ src/osmomitm
 /.settings/
 
 # generated files
-*.il
-*.burstmap
-*.cc
-*.crc
-*.plain
+**/test_data/*.il
+**/test_data/*.burstmap
+**/test_data/*.cc
+**/test_data/*.crc
+**/test_data/*.plain
+**/test_data/*XOR*

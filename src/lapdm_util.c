@@ -193,3 +193,10 @@ int pull_lapd_ctx(struct msgb *msg,
 
 	return 0;
 }
+
+void lapdm_set_length (uint8_t *l2_hdr, uint8_t len, uint8_t more_seg, uint8_t final_oct) {
+	uint8_t len_field = final_oct;
+	len_field |= more_seg << 1;
+	len_field |= len << 2;
+	l2_hdr[2] = len_field;
+}

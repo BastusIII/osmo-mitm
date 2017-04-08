@@ -72,3 +72,4 @@ enum lapdm_format {
 /* pull the layer 2 header and parse it to a lapdm context */
 int pull_lapd_ctx(struct msgb *msg,
 	uint8_t chan_nr, uint8_t link_id, enum lapdm_mode mode, struct lapdm_msg_ctx *mctx, struct lapd_msg_ctx *lctx);
+void lapdm_set_length (uint8_t *l2_hdr, uint8_t len, uint8_t more_seg, uint8_t final_oct);

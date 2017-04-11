@@ -203,7 +203,9 @@ int xcch_encode(const enum data_type type, const uint8_t *input,
 		}
 	}
 
-	osmo_ubit2pbit(burst_buf, eD, LEN_BURSTMAP_XCCH);
+	if(burst_buf) {
+		osmo_ubit2pbit(burst_buf, eD, LEN_BURSTMAP_XCCH);
+	}
 
 	if (il_buf) {
 		osmo_ubit2pbit(il_buf, iD, LEN_INTERLEAVED_XCCH);
@@ -271,9 +273,11 @@ int xcch_decode(const enum data_type input_type, const uint8_t *input,
 		LEN_PLAIN,
 		                                     &uD[LEN_PLAIN]);
 	}
-	// unpack bits to output buffer
-	osmo_ubit2pbit(plain_buf, uD, LEN_PLAIN);
 
+	if(plain_buf) {
+		// unpack bits to output buffer
+		osmo_ubit2pbit(plain_buf, uD, LEN_PLAIN);
+	}
 	if (il_buf) {
 		osmo_sbit2ubit(buf, iD, LEN_INTERLEAVED_XCCH);
 		osmo_ubit2pbit(il_buf, buf, LEN_INTERLEAVED_XCCH);
@@ -344,8 +348,9 @@ int facch_encode(const enum data_type type, const uint8_t *input,
 		}
 	}
 
-	osmo_ubit2pbit(burst_buf, eD, LEN_BURSTMAP_FACCH);
-
+	if(burst_buf) {
+		osmo_ubit2pbit(burst_buf, eD, LEN_BURSTMAP_FACCH);
+	}
 	if (il_buf) {
 		osmo_ubit2pbit(il_buf, iD, LEN_INTERLEAVED_FACCH);
 	}
@@ -361,7 +366,7 @@ int facch_encode(const enum data_type type, const uint8_t *input,
 
 int facch_decode(const enum data_type input_type, const uint8_t *input,
                  uint8_t *il_buf, uint8_t *cc_buf, uint8_t *crc_buf,
-                 uint8_t *data_buf)
+                 uint8_t *plain_buf)
 {
 	int i, crc_error, steal = 0;
 	sbit_t h; // buffer for h, the stealing flag
@@ -419,9 +424,11 @@ int facch_decode(const enum data_type input_type, const uint8_t *input,
 		LEN_PLAIN,
 		                                     &uD[LEN_PLAIN]);
 	}
-	// unpack bits to output buffer
-	osmo_ubit2pbit(data_buf, uD, LEN_PLAIN);
 
+	if(plain_buf) {
+		// unpack bits to output buffer
+		osmo_ubit2pbit(plain_buf, uD, LEN_PLAIN);
+	}
 	if (il_buf) {
 		osmo_sbit2ubit(buf, iD, LEN_INTERLEAVED_FACCH);
 		osmo_ubit2pbit(il_buf, buf, LEN_INTERLEAVED_FACCH);

@@ -49,3 +49,5 @@
  */
 void chantype_gsmtap2rsl(uint8_t gsmtap_chantype, uint8_t *rsl_chantype,
                          uint8_t *link_id);
+
+void xor_data(uint8_t *xored, uint8_t *data_1, uint8_t *data_2, uint16_t data_len);

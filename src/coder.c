@@ -13,7 +13,7 @@
 #include <osmocom/core/conv.h>
 #include <osmocom/core/crcgen.h>
 
-#include <coder.h>
+#include <mitm/coder.h>
 
 /**
  * @see osmo-bts-trx/gsm0503_interleaving.c

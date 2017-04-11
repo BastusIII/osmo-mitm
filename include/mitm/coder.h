@@ -18,9 +18,12 @@
  * g(x) = (x^23 + 1)(x^17 + x^3 + 1)
  *      = x^40 + x^26 + x^23 + x^17 + x^3 + a1
  */
-static const struct osmo_crc64gen_code gsm0503_fire_crc40 = {.bits = 40, .poly =
-	0x0004820009ULL, .init = 0x0000000000ULL, .remainder =
-	0xffffffffffULL,};
+static const struct osmo_crc64gen_code gsm0503_fire_crc40 = {
+	.bits = 40,
+	.poly =	0x0004820009ULL,
+	.init = 0x0000000000ULL,
+	.remainder = 0xffffffffffULL
+};
 
 // DO NOT CHANGE ORDER!
 enum data_type {

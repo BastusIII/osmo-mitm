@@ -4,7 +4,7 @@
 #include <osmocom/gsm/lapdm.h>
 #include <errno.h>
 #include <string.h>
-#include <lapdm_util.h>
+#include <mitm/lapdm_util.h>
 
 /* pull the layer 2 header and parse it to a lapdm context */
 int pull_lapd_ctx(struct msgb *msg,

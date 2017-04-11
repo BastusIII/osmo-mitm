@@ -4,8 +4,8 @@
 #include <osmocom/core/utils.h>
 #include <osmocom/core/conv.h>
 
-#include <coder.h>
-#include <cipherer.h>
+#include <mitm/coder.h>
+#include <mitm/cipherer.h>
 
 #define SUFFIX_PLAIN ".plain"
 #define SUFFIX_CRC ".crc"

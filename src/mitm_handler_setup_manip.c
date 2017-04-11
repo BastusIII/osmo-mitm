@@ -1,8 +1,8 @@
 #include <stdio.h>
 #include <getopt.h>
-#include <virtphy/osmo_mcast_sock.h>
-#include <virtphy/virtual_um.h>
-#include <virtphy/common_util.h>
+#include <errno.h>
+#include <string.h>
+
 #include <osmocom/core/gsmtap.h>
 #include <osmocom/core/utils.h>
 #include <osmocom/gsm/protocol/gsm_04_08.h>
@@ -12,16 +12,11 @@
 #include <osmocom/core/linuxlist.h>
 #include <osmocom/gsm/lapd_core.h>
 #include <osmocom/gsm/lapdm.h>
-#include <coder.h>
-#include <errno.h>
-#include <string.h>
-#include <lapdm_util.h>
 
-#define DEFAULT_DL_RX_GRP DEFAULT_MS_MCAST_GROUP
-#define DEFAULT_DL_TX_GRP "226.0.0.1"
-#define DEFAULT_UL_RX_GRP "226.0.0.2"
-#define DEFAULT_UL_TX_GRP DEFAULT_BTS_MCAST_GROUP
-#define DEFAULT_MCAST_PORT 4729 /* IANA-registered port for GSMTAP */
+#include <virtphy/common_util.h>
+#include <mitm/lapdm_util.h>
+#include <mitm/coder.h>
+#include <mitm/mitm.h>
 
 #define IMSI_MAX_DIGITS 15
 #define GSM_EXTENSION_LENGTH 15
@@ -77,15 +72,6 @@ struct pending_setup_intercept {
 	struct chan_desc chan;
 };
 
-static char* dl_rx_grp = DEFAULT_DL_RX_GRP;
-static char* dl_tx_grp = DEFAULT_DL_TX_GRP;
-static char* ul_rx_grp = DEFAULT_UL_RX_GRP;
-static char* ul_tx_grp = DEFAULT_UL_TX_GRP;
-static int port = DEFAULT_MCAST_PORT;
-
-static struct virt_um_inst *downlink = NULL;
-static struct virt_um_inst *uplink = NULL;
-
 static uint32_t intercept_arfcn = 666;
 static enum mitm_state mitm_state = STATE_IMSI_CATCHER_SABM;
 static struct pending_setup_intercept pending_setup_interc;
@@ -99,15 +85,11 @@ static char *msisdn_attacker; // attacker telephone number
 static int msidn_offset_from_l2_hdr = 3 + 11; // bytes between bcd coded msisdn and start of lapdm header
 
 
-static void handle_options(int argc, char **argv)
+void handle_suboptions(int argc, char **argv)
 {
 	while (1) {
 		int option_index = 0, c;
 		static struct option long_options[] = {
-			{"dl-rx-grp", 1, 0, 'v'},
-			{"dl-tx-grp", 1, 0, 'w'},
-		        {"ul-rx-grp", 1, 0, 'x'},
-		        {"ul-tx-grp", 1, 0, 'y'},
 		        {"imsi-victim", 1, 0, 'a'},
 		        {"msisdn-called", 1, 0, 'b'},
 		        {"msisdn-attacker", 1, 0, 'c'},
@@ -115,28 +97,12 @@ static void handle_options(int argc, char **argv)
 		        {0, 0, 0, 0},
 		};
 
-		c = getopt_long(argc, argv, "z:y:x:w:v:a:b:c:d:", long_options,
+		c = getopt_long(argc, argv, "a:b:c:d:", long_options,
 		                &option_index);
 		if (c == -1)
 			break;
 
 		switch (c) {
-		case 'v':
-			dl_rx_grp = optarg;
-			break;
-		case 'w':
-			dl_tx_grp = optarg;
-			break;
-		case 'x':
-			ul_rx_grp = optarg;
-			break;
-		case 'y':
-			ul_tx_grp = optarg;
-			break;
-		case 'z':
-			port = atoi(optarg);
-			break;
-
 		case 'a':
 			imsi_victim = optarg;
 			break;
@@ -303,7 +269,7 @@ static struct map_imsi_tmsi* get_subscriber(uint8_t *mi, int mi_len) {
 	return NULL;
 }
 
-static void downlink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
+struct msgb *downlink_rcv_cb_handler(struct msgb *msg)
 {
 	struct gsmtap_hdr *gh = msgb_l1(msg);
 	uint8_t *l2_hdr;
@@ -446,17 +412,16 @@ push_hdr:
 	}
 	if(modified) {
 		fprintf(stderr,"mod dump: %s\n", osmo_hexdump(msgb_data(manip_msg), msgb_length(manip_msg)));
-		virt_um_write_msg(downlink, manip_msg);
 		msgb_free(msg);
-		return;
+		return manip_msg;
 	}
 
 forward_msg:
 	// Forward msg to downlink
-	virt_um_write_msg(downlink, msg);
+	return msg;
 }
 
-static void uplink_rcv_cb(struct virt_um_inst *vui, struct msgb *msg)
+struct msgb* uplink_rcv_cb_handler(struct msgb *msg)
 {
 	uint8_t encoded_msg[LEN_BURSTMAP_XCCH / 8] = {0};
 	uint8_t encoded_manip_msg[LEN_BURSTMAP_XCCH / 8] = {0};
@@ -648,39 +613,14 @@ push_hdr:
 	}
 	if(modified) {
 		fprintf(stderr,"mod dump: %s\n", osmo_hexdump(msgb_data(manip_msg), msgb_length(manip_msg)));
-		virt_um_write_msg(downlink, manip_msg);
 		msgb_free(msg);
-		return;
+		return manip_msg;
 	}
 
 	// Forward msg to uplink
 forward_msg:
-	virt_um_write_msg(uplink, msg);
-	return;
+	return msg;
 free_msg:
 	msgb_free(msg);
-}
-
-int main(int argc, char **argv)
-{
-	fprintf(stderr, "STARTUP...\n");
-
-	handle_options(argc, argv);
-
-	// The socket intercepting downlink traffic
-	downlink = virt_um_init(NULL, dl_tx_grp, port, dl_rx_grp, port,
-	                        downlink_rcv_cb);
-	// The socket intercepting uplink traffic
-	uplink = virt_um_init(NULL, ul_tx_grp, port, ul_rx_grp, port,
-	                      uplink_rcv_cb);
-	while (1) {
-		// handle osmocom fd READ events (l1ctl-unix-socket, virtual-um-mcast-socket)
-		osmo_select_main(0);
-	}
-
-	virt_um_destroy(downlink);
-	virt_um_destroy(uplink);
-
-	// not reached
-	return EXIT_FAILURE;
+	return NULL;
 }

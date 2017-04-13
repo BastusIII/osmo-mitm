@@ -1,4 +1,5 @@
 #include <getopt.h>
+#include <osmocom/core/msgb.h>
 
 /**
  * No additional options.

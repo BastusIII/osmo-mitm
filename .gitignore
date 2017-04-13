@@ -20,7 +20,7 @@ core
 core.*
 
 # generated executable files
-src/osmomitm
+src/osmomitm*
 
 # Backups, vi, merges
 *~
